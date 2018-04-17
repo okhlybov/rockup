@@ -58,7 +58,7 @@ class Source < String
 	attr_reader :project, :directory
 
 	def initialize(project, directory, id = nil)
-		super(id.nil? ? Base64.encode64(Zlib.crc32(directory).to_s)[0..-4] : id)
+		super(id.nil? ? Zlib.crc32(directory).to_s(16) : id)
 		@project = project
 		@directory = directory
 	end
@@ -134,14 +134,15 @@ class Volume < String
 		@cleanup = true
 		if (@id = id).nil?
 			@new = true
-			@id = Time.now.to_i # Preserve integer representation to prevent quotation of the number-like string by YAML emitter
-			@path = File.join(project.destination, @id.to_s)
+			#@id = Time.now.to_i # Preserve integer representation to prevent quotation of the number-like string by YAML emitter
+			@id = Time.now.to_i.to_s(16)
+			@path = File.join(project.destination, @id)
 		else
 			@new = false
-			@path = File.join(project.destination, @id.to_s)
+			@path = File.join(project.destination, @id)
 			raise 'Volume does not exist' unless File.directory?(@path)
 		end
-		super(@id.to_s)
+		super(@id)
 	end
 
 	def store!
@@ -245,7 +246,7 @@ class Manifest
 	def store!
 		if modified?
 			time = @state['mtime'] = Time.now
-			@file = "#{time.to_i}.yaml"
+			@file = "#{time.to_i.to_s(16)}.yaml"
 			@path = File.join(project.destination, @file)
 			raise 'Refuse to overwrite exising manifest' if File.exist?(@path)
 			begin
