@@ -19,7 +19,7 @@ class Project
 		@source = {}
 		sources.each do |dir|
 			src = Source.new(self, dir)
-			source[src.id] = src
+			source[src] = src
 		end
 	end
 
@@ -53,18 +53,22 @@ class Project
 end # Project
 
 
-class Source
+class Source < String
 
-	attr_reader :id, :project, :directory
+	attr_reader :project, :directory
 
 	def initialize(project, directory, id = nil)
+		super(id.nil? ? Base64.encode64(Zlib.crc32(directory).to_s)[0..-4] : id)
 		@project = project
 		@directory = directory
-		@id = id.nil? ? Base64.encode64(Zlib.crc32(directory).to_s)[0..-4] : id
 	end
 
 	def files
 		scan(Set.new, directory)
+	end
+
+	def encode_with(coder)
+		coder.represent_object(nil, to_s)
 	end
 
 	# Append all files recursively contained in root into list
@@ -115,30 +119,29 @@ class Source
 end # Source
 
 
-class Volume
+class Volume < String
 
-	attr_reader :id, :project,
-		:path # Path to the volume root directory
+	attr_reader :project, :path 
 
 	def modified?; @modified end
 
-	def initialize(project, tag = nil)
+	def initialize(project, id = nil)
 		@project = project
 		@modified = false
 		@contents = [] # Array of Stream instances
 		# Perform cleanup actions on rollback
 		# Note then setting this to true might leave the on-disk data in inconsistent state
 		@cleanup = true
-		if tag.nil?
+		if (@id = id).nil?
 			@new = true
-			@id = Time.now.to_i # Leave integer to prevent quotation of the number-like string by YAML emitter
-			@path = File.join(project.destination, id.to_s)
+			@id = Time.now.to_i # Preserve integer representation to prevent quotation of the number-like string by YAML emitter
+			@path = File.join(project.destination, @id.to_s)
 		else
 			@new = false
-			@id = id
-			@path = File.join(project.destination, id.to_s)
+			@path = File.join(project.destination, @id.to_s)
 			raise 'Volume does not exist' unless File.directory?(@path)
 		end
+		super(@id.to_s)
 	end
 
 	def store!
@@ -146,8 +149,8 @@ class Volume
 			raise 'Refuse to overwrite existing volume' if @new && File.exist?(path)
 			begin
 				@contents.each do |stream|
-					FileUtils.mkdir_p(basedir = File.join(path, File.dirname(stream.id)))
-					FileUtils.cp_r(File.join(stream.file.source.directory, stream.file), File.join(path, stream.id))
+					FileUtils.mkdir_p(basedir = File.join(path, File.dirname(stream)))
+					FileUtils.cp_r(File.join(stream.file.source.directory, stream.file), File.join(path, stream))
 				end
 			rescue
 				cleanup!
@@ -164,13 +167,17 @@ class Volume
 		stream
 	end
 
+	def encode_with(coder)
+		coder.represent_object(nil, @id)
+	end
+
 	def cleanup!
 		FileUtils.rm_rf(@path) if modified? && @cleanup
 	end
 
 	class Stream < String
 
-		attr_reader :id, :volume, :file
+		attr_reader :volume, :file
 
 		attr_accessor :sha1
 
@@ -178,7 +185,7 @@ class Volume
 			super(file)
 			@volume = volume
 			@file = file
-			@id = File.join(file.source.id, file)
+			super(File.join(file.source, file))
 		end
 
 		def encode_with(coder)
@@ -186,11 +193,11 @@ class Volume
 		end
 
 		def to_h
-			{id => {'sha1' => sha1, 'volume' => volume.id}}
+			{to_s => {'sha1' => sha1, 'volume' => volume}}
 		end
 
 		def sha1
-			@sha1.nil? ? @sha1 = Digest::SHA1.file(File.join(volume.path, id)).to_s : @sha1 # TODO compute hash on file to stream copying to avoid extra pass though file contents
+			@sha1.nil? ? @sha1 = Digest::SHA1.file(File.join(volume.path, self)).to_s : @sha1 # TODO compute hash on file to stream copying to avoid extra pass though file contents
 		end
 
 	end # Stream
@@ -257,7 +264,7 @@ class Manifest
 
 	def merge!(file, stream)
 		source = file.source
-		sources[source.id] = contents = {'directory' => source.directory, 'files' => {}} if (contents = sources[source.id]).nil?
+		sources[source] = contents = {'directory' => source.directory, 'files' => {}} if (contents = sources[source]).nil?
 		hash = file.to_h; hash[file].merge!('stream' => stream)
 		contents['files'].merge!(hash)
 		@modified = true
