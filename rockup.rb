@@ -1,3 +1,4 @@
+require 'set'
 require 'yaml'
 require 'zlib'
 require 'base64'
@@ -63,7 +64,7 @@ class Source
 	end
 
 	def files
-		scan([], directory)
+		scan(Set.new, directory)
 	end
 
 	# Append all files recursively contained in root into list
@@ -185,7 +186,7 @@ class Volume
 		end
 
 		def to_h
-			{id => {'volume' => volume.id, 'sha1' => sha1}}
+			{id => {'sha1' => sha1, 'volume' => volume.id}}
 		end
 
 		def sha1
@@ -257,7 +258,8 @@ class Manifest
 	def merge!(file, stream)
 		source = file.source
 		sources[source.id] = contents = {'directory' => source.directory, 'files' => {}} if (contents = sources[source.id]).nil?
-		contents['files'][file] = {'stream' => stream}
+		hash = file.to_h; hash[file].merge!('stream' => stream)
+		contents['files'].merge!(hash)
 		@modified = true
 	end
 
