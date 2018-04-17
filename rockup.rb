@@ -32,7 +32,9 @@ class Project
 		end
 		source.each_value do |source|
 			source.files.each do |file|
-				manifest.merge!(file, volume.merge!(file))
+				_file = manifest.file(source, file)
+				p _file, file
+				manifest.merge!(file, volume.merge!(file)) if _file.nil? || _file['mtime'] < file.stat.mtime
 			end
 		end
 		begin
@@ -219,6 +221,10 @@ class Manifest
 	def session; @state['session'] end
 
 	def sources; @state['sources'] end
+
+	def file(source, file)
+		sources[source]&.[]('files')&.[](file)
+	end
 
 	attr_reader :project
 
