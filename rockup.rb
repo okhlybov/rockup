@@ -13,10 +13,14 @@ class Project
 
 	attr_reader :source, :volume, :manifest, :destination
 
+	# When true, do not modify the file system in any way (do not create manifests/volumes/directories etc.)
+	def dry?; @dry end
+
 	def initialize(sources, destination)
 		@destination = destination
 		@volume = Volume.new(self)
 		@source = {}
+		#@dry = true
 		sources.each do |dir|
 			src = Source.new(self, dir)
 			source[src] = src
@@ -25,18 +29,23 @@ class Project
 
 	def backup!
 		if File.directory?(destination)
-			@manifest = Manifest.new(self, manifests.sort.first)
+			@manifest = Manifest.new(self, manifests.sort.last) # By default read the latest created manifest
 		else
-			FileUtils.mkdir(destination)
+			FileUtils.mkdir(destination) unless dry?
 			@manifest = Manifest.new(self)
 		end
 		source.each_value do |source|
 			source.files.each do |file|
-				_file = manifest.file(source, file)
-				p _file, file
-				manifest.merge!(file, volume.merge!(file)) if _file.nil? || _file['mtime'] < file.stat.mtime
+				manifest_file = manifest.file(file)
+				if manifest_file.nil? || manifest_file['mtime'] < file.stat.mtime
+					manifest.merge!(file, volume.merge!(file))
+				else
+					manifest.live!(file) unless manifest_file.nil?
+				end
+
 			end
 		end
+		manifest.purge!
 		begin
 			volume.store!
 			manifest.store!
@@ -148,7 +157,7 @@ class Volume < String
 	end
 
 	def store!
-		if modified?
+		if !project.dry? && modified?
 			raise 'Refuse to overwrite existing volume' if @new && File.exist?(path)
 			begin
 				@contents.each do |stream|
@@ -175,7 +184,7 @@ class Volume < String
 	end
 
 	def cleanup!
-		FileUtils.rm_rf(@path) if modified? && @cleanup
+		FileUtils.rm_rf(@path) if !project.dry? && modified? && @cleanup
 	end
 
 	class Stream < String
@@ -222,8 +231,8 @@ class Manifest
 
 	def sources; @state['sources'] end
 
-	def file(source, file)
-		sources[source]&.[]('files')&.[](file)
+	def file(file)
+		sources[file.source]&.[]('files')&.[](file)
 	end
 
 	attr_reader :project
@@ -250,7 +259,7 @@ class Manifest
 	end
 
 	def store!
-		if modified?
+		if modified? && !project.dry?
 			time = @state['mtime'] = Time.now
 			@file = "#{time.to_i.to_s(16)}.yaml"
 			@path = File.join(project.destination, @file)
@@ -270,15 +279,26 @@ class Manifest
 	end
 
 	def merge!(file, stream)
-		source = file.source
-		sources[source] = contents = {'directory' => source.directory, 'files' => {}} if (contents = sources[source]).nil?
-		hash = file.to_h; hash[file].merge!('stream' => stream)
-		contents['files'].merge!(hash)
+		sources[file.source] = source = {'directory' => file.source.directory, 'files' => {}} if (source = sources[file.source]).nil?
+		hash = file.to_h; hash[file].merge!('live' => true, 'stream' => stream)
+		source['files'].merge!(hash)
 		@modified = true
 	end
 
+	# Tag +file+ as live
+	def live!(file)
+		sources[file.source]['files'][file]['live'] = true
+	end
+
+	# Forget all files not tagged as live
+	def purge!
+		sources.each_value do |source|
+			@modified = true unless source['files'].reject! {|file, data| !data.delete('live')}.nil?
+		end
+	end
+
 	def cleanup!
-		FileUtils.rm_rf(@path) if modified? && @cleanup
+		FileUtils.rm_rf(@path) if !project.dry? && modified? && @cleanup
 	end
 
 end # Manifest
@@ -287,5 +307,5 @@ end # Manifest
 end # Rockup
 
 
-p = Rockup::Project.new(['src1', 'src2'], 'dst')
+p = Rockup::Project.new(['src'], 'dst')
 p.backup!
