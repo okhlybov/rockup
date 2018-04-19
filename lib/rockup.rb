@@ -1,7 +1,6 @@
 require 'set'
 require 'yaml'
 require 'zlib'
-require 'base64'
 require 'fileutils'
 require 'securerandom'
 
@@ -16,20 +15,25 @@ class Project
 	# When true, do not modify the file system in any way (do not create manifests/volumes/directories etc.)
 	def dry?; @dry end
 
+	def dry=(arg) @dry = arg end
+
 	def initialize(sources, destination)
 		@destination = destination
 		@volume = Volume.new(self)
 		@source = {}
-		#@dry = true
 		sources.each do |dir|
 			src = Source.new(self, dir)
 			source[src] = src
 		end
 	end
 
-	def backup!
+	def backup!(incremental = true)
 		if File.directory?(destination)
-			@manifest = Manifest.new(self, manifests.sort.last) # By default read the latest created manifest
+			if incremental
+				@manifest = Manifest.new(self, manifests.sort.last) # By default read the latest created manifest
+			else
+				@manifest = Manifest.new(self)
+			end
 		else
 			FileUtils.mkdir(destination) unless dry?
 			@manifest = Manifest.new(self)
@@ -280,20 +284,20 @@ class Manifest
 
 	def merge!(file, stream)
 		sources[file.source] = source = {'directory' => file.source.directory, 'files' => {}} if (source = sources[file.source]).nil?
-		hash = file.to_h; hash[file].merge!('live' => true, 'stream' => stream)
+		hash = file.to_h; hash[file].merge!(:live => true, 'stream' => stream)
 		source['files'].merge!(hash)
 		@modified = true
 	end
 
 	# Tag +file+ as live
 	def live!(file)
-		sources[file.source]['files'][file]['live'] = true
+		sources[file.source]['files'][file][:live] = true
 	end
 
 	# Forget all files not tagged as live
 	def purge!
 		sources.each_value do |source|
-			@modified = true unless source['files'].reject! {|file, data| !data.delete('live')}.nil?
+			@modified = true unless source['files'].reject! {|file, data| !data.delete(:live)}.nil?
 		end
 	end
 
@@ -305,7 +309,3 @@ end # Manifest
 
 
 end # Rockup
-
-
-p = Rockup::Project.new(['src'], 'dst')
-p.backup!

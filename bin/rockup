@@ -1,0 +1,53 @@
+#!/usr/bin/env ruby
+
+require 'rockup'
+require 'optparse'
+
+options = {
+	mode: :backup
+}
+
+OptionParser.new do |opts|
+
+	opts.banner = 'Usage: rockup [options] backup-dir {source-dir-1 source-dir-2 ...}'
+
+	opts.on('-h', '--help', 'Print help') do
+		puts opts
+		exit
+	end
+
+	opts.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do
+		options[:mode] = :backup
+	end
+
+	opts.on('-B', 'Force full backup') do
+		options[:mode] = :backup
+		options[:full] = true
+	end
+
+	opts.on('-r DESTDIR', 'Restore files from backup') do |dir|
+		options[:mode] = :restore
+		options[:restore] = dir
+	end
+
+	opts.on('--dry-run', 'Do not modify the filesystem in any way (no files/directories are created or modified)') do
+		options[:dry] = true
+	end
+
+end.parse!
+
+raise 'Backup directory must be specified' if ARGV.empty?
+
+backupdir =  ARGV.shift
+srcdirs = ARGV
+
+project = Rockup::Project.new(srcdirs, backupdir)
+
+project.dry = options[:dry]
+
+case options[:mode]
+when :backup
+	project.backup!(!options[:full])
+when :restore
+	project.restore!
+end
