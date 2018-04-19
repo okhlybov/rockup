@@ -20,7 +20,7 @@ Therefore, in order to use **Rockup** it is necessary to install playform-specif
 * Windows
 > Refer to [RubyInstaller.org](https://rubyinstaller.org/) the all-in-one Ruby distribution.
 * UNIX/Linux
-> Refer to operatime system specific distribution instructions.
+> Refer to operation system -specific installation instructions.
 
 Once the Ruby runtime is installed, it is time to install the **Rockup** itself. The latter is distribued in form of a [Gem](https://en.wikipedia.org/wiki/RubyGems) obtained from central repository [RubyGems.org](https://rubygems.org/).
 
