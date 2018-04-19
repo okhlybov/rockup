@@ -36,10 +36,11 @@ OptionParser.new do |opts|
 
 end.parse!
 
-raise 'Backup directory must be specified' if ARGV.empty?
-
 backupdir =  ARGV.shift
 srcdirs = ARGV
+
+raise 'Backup directory must be specified' if backupdir.nil?
+raise 'At least one source directory must be specified' if srcdirs.empty?
 
 project = Rockup::Project.new(srcdirs, backupdir)
 

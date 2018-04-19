@@ -30,7 +30,7 @@ class Project
 	def backup!(incremental = true)
 		if File.directory?(destination)
 			if incremental
-				@manifest = Manifest.new(self, manifests.sort.last) # By default read the latest created manifest
+				@manifest = Manifest.new(self, Manifest.manifests(destination).sort.last) # By default read the latest created manifest
 			else
 				@manifest = Manifest.new(self)
 			end
@@ -58,11 +58,6 @@ class Project
 			manifest.cleanup!
 			raise
 		end
-	end
-
-	# Find all manifest files in the destination
-	def manifests
-		Dir[File.join(destination, Manifest::Glob)]
 	end
 
 end # Project
@@ -225,7 +220,10 @@ class Manifest
 
 	Version = 0
 
-	Glob = '*.yaml'
+	# Find all manifest files in the destination
+	def self.manifests(dir)
+		Dir[File.join(dir, '*.yaml.gz')]
+	end
 
 	def modified?; @modified end
 
@@ -256,7 +254,11 @@ class Manifest
 				'sources' => {}
 			}
 		else
-			@state = YAML.load(IO.read(@file))
+			open(@file, 'r') do |io|
+				Zlib::GzipReader.wrap(io) do |gz|
+					@state = YAML.load(gz)
+				end
+			end
 			raise 'Unsupported manifest version' unless version == Version
 			raise 'Missing manifest session ID' if session.nil?
 		end
@@ -265,12 +267,14 @@ class Manifest
 	def store!
 		if modified? && !project.dry?
 			time = @state['mtime'] = Time.now
-			@file = "#{time.to_i.to_s(16)}.yaml"
+			@file = "#{time.to_i.to_s(16)}.yaml.gz"
 			@path = File.join(project.destination, @file)
 			raise 'Refuse to overwrite exising manifest' if File.exist?(@path)
 			begin
 				open(@path, 'w') do |io|
-					io.write(YAML.dump(@state))
+					Zlib::GzipWriter.wrap(io) do |gz|
+						gz.write(YAML.dump(@state))
+					end
 				end
 			rescue
 				cleanup!
