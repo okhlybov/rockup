@@ -8,19 +8,29 @@ require 'securerandom'
 module Rockup
 
 
+Version = '0.1'
+
+
 class Project
 
-	attr_reader :source, :volume, :manifest, :destination
+	attr_reader :source, :volume, :manifest, :destination, :compress
 
 	# When true, do not modify the file system in any way (do not create manifests/volumes/directories etc.)
 	def dry?; @dry end
 
 	def dry=(arg) @dry = arg end
 
+	@@compress = Set.new [:auto, :force, :disable]
+
+	def compress=(mode)
+		raise 'Invalid compresssion specifier' unless @@compress.include?(@compress = mode)
+	end
+
 	def initialize(sources, destination)
 		@destination = destination
 		@volume = Volume.new(self)
 		@source = {}
+		self.compress = :auto
 		sources.each do |dir|
 			src = Source.new(self, dir)
 			source[src] = src
@@ -124,6 +134,33 @@ class Source < String
 			@stat.nil? ? @stat = ::File::Stat.new(@path) : @stat
 		end
 
+		# Return true if the file is worth compressing
+		def compressible?
+			size = stat.size
+			size*File.compression_ratio(self) + 18 + (to_s.size+1) < size # 18 bytes is the minimum GZip overhead
+
+		end
+
+		# (non-exhaustive list of) the most widely used packed file format extensions which are not subject to compression
+
+		packed_audio = %w(aac ape flac gsm m4a m4b m4p mp3 mka mogg mpc oga ogg opus ra wma)
+
+		packed_video = %w(3gp 3g2 asf avi flv f4v f4p f4a f4b mkv m4v mp4 mp4v mpg mpeg mp2 mpe mpv m2v nsv ogv ogg ogv rm vc1 vob webm wmv qt)
+
+		packed_image = %w(bpg gif jpeg jpg jfif jp2 j2k jpf jpx jpm mj2 png tif tiff webp)
+
+		packed_archive = %w(7z s7z ace apk arc arj cab cfs dmg jar lzh lha lzx rar war wim zip zipx zpaq zz gz tgz bz2 tbz tbz2 lzma tlz xz txz)
+
+		packed = (packed_audio + packed_video + packed_image + packed_archive).join('|')
+
+		# Match files which are presumably not worth compressing
+		@@packed = Regexp.new("\\.(#{packed})$", Regexp::IGNORECASE)
+
+		# Return presumed compression ratio for a given file
+		def self.compression_ratio(file)
+			@@packed =~ file ? 1.05 : 0.5
+		end
+
 	end # File
 
 end # Source
@@ -144,11 +181,9 @@ class Volume < String
 		@cleanup = true
 		if (@id = id).nil?
 			@new = true
-			#@id = Time.now.to_i # Preserve integer representation to prevent quotation of the number-like string by YAML emitter
 			@id = Time.now.to_i.to_s(16)
 			@path = File.join(project.destination, @id)
 		else
-			@new = false
 			@path = File.join(project.destination, @id)
 			raise 'Volume does not exist' unless File.directory?(@path)
 		end
@@ -161,7 +196,17 @@ class Volume < String
 			begin
 				@contents.each do |stream|
 					FileUtils.mkdir_p(basedir = File.join(path, File.dirname(stream)))
-					FileUtils.cp_r(File.join(stream.file.source.directory, stream.file), File.join(path, stream))
+					srcpath = File.join(stream.file.source.directory, stream.file)
+					dstpath = File.join(path, stream)
+					if stream.flags.include?(:gzip)
+						open(dstpath, 'wb') do |io|
+							Zlib::GzipWriter.wrap(io) do |gz|
+								gz.write(IO.read(srcpath))
+							end
+						end
+					else
+						FileUtils.copy_file(srcpath, dstpath, true)
+					end
 				end
 			rescue
 				cleanup!
@@ -174,7 +219,8 @@ class Volume < String
 	def merge!(file)
 		raise 'Refuse to modify existing volume' unless @new
 		@modified = true
-		@contents << (stream = Stream.new(self, file))
+		c = (project.compress == :auto && file.compressible? || project.compress == :force ? :gzip : nil)
+		@contents << (stream = Stream.new(self, file, c))
 		stream
 	end
 
@@ -188,15 +234,23 @@ class Volume < String
 
 	class Stream < String
 
-		attr_reader :volume, :file
+		attr_reader :volume, :file, :flags
 
 		attr_accessor :sha1
 
-		def initialize(volume, file)
+		@@compressor_ext = {gzip: 'gz'}
+
+		def initialize(volume, file, compressor = nil)
 			super(file)
 			@volume = volume
-			@file = file
-			super(File.join(file.source, file))
+			@file = file_s = file
+			@flags = Set.new
+			unless compressor.nil?
+				raise 'Unsupported compressor' unless @@compressor_ext.has_key?(compressor)
+				@flags << (@compressor = compressor)
+				file_s += ".#{@@compressor_ext[compressor]}"
+			end
+			super(File.join(file.source, file_s))
 		end
 
 		def encode_with(coder)
@@ -204,11 +258,13 @@ class Volume < String
 		end
 
 		def to_h
-			{to_s => {'sha1' => sha1, 'volume' => volume}}
+			opts = {'sha1' => sha1, 'volume' => volume}
+			opts['flags'] = @flags.to_a.join(' ') unless @flags.empty?
+			{to_s => opts}
 		end
 
 		def sha1
-			@sha1.nil? ? @sha1 = Digest::SHA1.file(File.join(volume.path, self)).to_s : @sha1 # TODO compute hash on file to stream copying to avoid extra pass though file contents
+			@sha1.nil? ? @sha1 = Digest::SHA1.file(File.join(volume.path, self)).to_s : @sha1 # TODO compute hash on file to stream copying to avoid extra pass though stream contents
 		end
 
 	end # Stream
@@ -254,7 +310,7 @@ class Manifest
 				'sources' => {}
 			}
 		else
-			open(@file, 'r') do |io|
+			open(@file, 'rb') do |io|
 				Zlib::GzipReader.wrap(io) do |gz|
 					@state = YAML.load(gz)
 				end
@@ -271,7 +327,7 @@ class Manifest
 			@path = File.join(project.destination, @file)
 			raise 'Refuse to overwrite exising manifest' if File.exist?(@path)
 			begin
-				open(@path, 'w') do |io|
+				open(@path, 'wb') do |io|
 					Zlib::GzipWriter.wrap(io) do |gz|
 						gz.write(YAML.dump(@state))
 					end
