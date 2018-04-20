@@ -1,6 +1,8 @@
+$: << 'lib'
+require 'rockup'
 Gem::Specification.new do |spec|
   spec.name = 'rockup'
-  spec.version = '0.1'
+  spec.version = Rockup::Version
   spec.author = 'Oleg A. Khlybov'
   spec.email = 'fougas@mail.ru'
   spec.homepage = 'https://bitbucket.org/fougas/rockup'
