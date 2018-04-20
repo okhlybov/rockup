@@ -3,35 +3,44 @@
 require 'rockup'
 require 'optparse'
 
-options = {
-	mode: :backup
+opts = {
+	mode: :backup,
+	compress: :auto
 }
 
-OptionParser.new do |opts|
+OptionParser.new do |parser|
 
-	opts.banner = 'Usage: rockup [options] backup-dir {source-dir-1 source-dir-2 ...}'
+	parser.banner = 'Usage: rockup [opts] backup-dir {source-dir-1 source-dir-2 ...}'
 
-	opts.on('-h', '--help', 'Print help') do
-		puts opts
+	parser.on('-h', '--help', 'Print help') do
+		puts parser
 		exit
 	end
 
-	opts.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do
-		options[:mode] = :backup
+	parser.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do
+		opts[:mode] = :backup
 	end
 
-	opts.on('-B', 'Force full backup') do
-		options[:mode] = :backup
-		options[:full] = true
+	parser.on('-B', 'Force full backup') do
+		opts[:mode] = :backup
+		opts[:full] = true
 	end
 
-	opts.on('-r DESTDIR', 'Restore files from backup') do |dir|
-		options[:mode] = :restore
-		options[:restore] = dir
+	parser.on('-r DESTDIR', 'Restore files from backup') do |dir|
+		opts[:mode] = :restore
+		opts[:restore] = dir
 	end
 
-	opts.on('--dry-run', 'Do not modify the filesystem in any way (no files/directories are created or modified)') do
-		options[:dry] = true
+	parser.on('--dry-run', 'Do not modify the filesystem in any way (no files/directories are created or modified)') do
+		opts[:dry] = true
+	end
+
+	parser.on('--compress', 'Enforce compression of backed data') do
+		opts[:compress] = :force
+	end
+
+	parser.on('--no-compress', 'Disable compression of backed data') do
+		opts[:compress] = :disable
 	end
 
 end.parse!
@@ -44,11 +53,12 @@ raise 'At least one source directory must be specified' if srcdirs.empty?
 
 project = Rockup::Project.new(srcdirs, backupdir)
 
-project.dry = options[:dry]
+project.dry = opts[:dry]
+project.compress = opts[:compress]
 
-case options[:mode]
+case opts[:mode]
 when :backup
-	project.backup!(!options[:full])
+	project.backup!(!opts[:full])
 when :restore
 	project.restore!
 end
