@@ -151,14 +151,25 @@ class Source < String
 
 		packed_archive = %w(7z s7z ace apk arc arj cab cfs dmg jar lzh lha lzx rar war wim zip zipx zpaq zz gz tgz bz2 tbz tbz2 lzma tlz xz txz)
 
-		packed = (packed_audio + packed_video + packed_image + packed_archive).join('|')
+		skip = (packed_audio + packed_video + packed_image + packed_archive).join('|')
 
 		# Match files which are presumably not worth compressing
-		@@packed = Regexp.new("\\.(#{packed})$", Regexp::IGNORECASE)
+		@@packed_exts = Regexp.new("\\.(#{skip})$", Regexp::IGNORECASE)
+
+		skip = [
+			'\.git/objects', # Git compressed objects
+		].join('|')
+
+		@@packed_stems = Regexp.new("(#{skip})")
 
 		# Return presumed compression ratio for a given file
 		def self.compression_ratio(file)
-			@@packed =~ file ? 1.05 : 0.5
+			case file
+			when @@packed_exts, @@packed_stems
+				1.05
+			else
+				0.5
+			end
 		end
 
 	end # File
@@ -240,17 +251,27 @@ class Volume < String
 
 		@@compressor_ext = {gzip: 'gz'}
 
+		@@index = 36*36-1
+
 		def initialize(volume, file, compressor = nil)
 			super(file)
 			@volume = volume
-			@file = file_s = file
+			@obfuscate = true # Obfuscate & shorten stream name
+			@file = file
+			file_s = if @obfuscate
+				f = (@@index+=1).to_s(36)
+				d = f.slice!(0, 2)
+				File.join(d, f)
+			else
+				@file
+			end
 			@flags = Set.new
 			unless compressor.nil?
 				raise 'Unsupported compressor' unless @@compressor_ext.has_key?(compressor)
 				@flags << (@compressor = compressor)
-				file_s += ".#{@@compressor_ext[compressor]}"
+				file_s += ".#{@@compressor_ext[compressor]}" unless @obfuscate
 			end
-			super(File.join(file.source, file_s))
+			super(@obfuscate ? file_s : File.join(file.source, file_s))
 		end
 
 		def encode_with(coder)
