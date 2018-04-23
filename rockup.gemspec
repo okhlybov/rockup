@@ -9,7 +9,7 @@ Gem::Specification.new do |spec|
   spec.summary = 'Cloud-friendly incremental file backup system'
   spec.files = Dir.glob ['lib/**/*.rb']
   spec.executables = ['rockup']
-  spec.required_ruby_version = '>= 2.3'
+  spec.required_ruby_version = '>= 2.4'
   spec.licenses = ['BSD-3-Clause']
   spec.description = <<-EOF
     Rockup is a file backup system designed to be cloud-friendly.

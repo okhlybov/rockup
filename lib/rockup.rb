@@ -28,8 +28,8 @@ class Project
 
 	def initialize(sources, destination)
 		@destination = destination
-		@volume = Volume.new(self)
 		@source = {}
+		@volume = {}; @volume.default_proc = proc {|hash, id| hash[id] = Volume.new(self, id)}
 		self.compress = :auto
 		sources.each do |dir|
 			src = Source.new(self, dir)
@@ -38,9 +38,10 @@ class Project
 	end
 
 	def backup!(incremental = true)
+		volume = Volume.new(self)
 		if File.directory?(destination)
 			if incremental
-				@manifest = Manifest.new(self, Manifest.manifests(destination).sort.last) # By default read the latest created manifest
+				@manifest = Manifest.new(self, Manifest.manifests(self).sort.last) # By default read the latest created manifest
 			else
 				@manifest = Manifest.new(self)
 			end
@@ -50,11 +51,11 @@ class Project
 		end
 		source.each_value do |source|
 			source.files.each do |file|
-				manifest_file = manifest.file(file)
-				if manifest_file.nil? || manifest_file['mtime'] < file.stat.mtime
+				manifested_file = manifest.file(file)
+				if manifested_file.nil? || manifested_file['mtime'] < file.stat.mtime
 					manifest.merge!(file, volume.merge!(file))
 				else
-					manifest.live!(file) unless manifest_file.nil?
+					manifest.live!(file) unless manifested_file.nil?
 				end
 
 			end
@@ -65,8 +66,23 @@ class Project
 			manifest.store!
 		rescue
 			volume.cleanup!
-			manifest.cleanup!
+#			manifest.cleanup!
 			raise
+		end
+	end
+
+	def restore!(dest)
+		raise 'Destination directory must exist and be empty' unless File.directory?(dest) && Dir.empty?(dest)
+		raise 'Nothing to restore as no manifest is found' if (mf = Manifest.manifests(destination).sort.last).nil?
+		volumes = {}
+		manifest = Manifest.new(self, mf)
+		manifest.sources.each_value do |source|
+			source['files'].each do |dstfile, state|
+				state['stream'].each do |srcfile, state|
+					v = state['volume']
+					volumes[v] = Volume.new(self, v) unless volumes.has_key?(v)
+				end
+			end
 		end
 	end
 
@@ -185,10 +201,13 @@ class Volume < String
 
 	def modified?; @modified end
 
+	def obfuscate?; @obfuscate end
+
 	def initialize(project, id = nil)
 		@project = project
 		@modified = false
 		@contents = [] # Array of Stream instances
+		@obfuscate = true
 		# Perform cleanup actions on rollback
 		# Note then setting this to true might leave the on-disk data in inconsistent state
 		@cleanup = true
@@ -203,22 +222,34 @@ class Volume < String
 		super(@id)
 	end
 
+	# Return list of volume ids residing in the project's destination
+	# Note that this method does not actually read them
+	def self.volumes(project)
+		Dir[File.join(project.destination, '*')].keep_if {|f| File.directory?(f)}.collect {|d| File.basename(d)}
+	end
+
 	def store!
 		if !project.dry? && modified?
 			raise 'Refuse to overwrite existing volume' if @new && File.exist?(path)
 			begin
 				@contents.each do |stream|
 					FileUtils.mkdir_p(basedir = File.join(path, File.dirname(stream)))
-					srcpath = File.join(stream.file.source.directory, stream.file)
-					dstpath = File.join(path, stream)
-					if stream.flags.include?(:gzip)
-						open(dstpath, 'wb') do |io|
-							Zlib::GzipWriter.wrap(io) do |gz|
-								gz.write(IO.read(srcpath))
+					ifs = open(File.join(stream.file.source.directory, stream.file), 'rb')
+					begin
+						ofs = write_io(stream)
+						begin
+							if stream.flags.include?(:gzip)
+								Zlib::GzipWriter.wrap(ofs) do |gz|
+									gz.write(ifs.read)
+								end
+							else
+								FileUtils.copy_stream(ifs, ofs)
 							end
+						ensure
+							ofs.close
 						end
-					else
-						FileUtils.copy_file(srcpath, dstpath, true)
+					ensure
+						ifs.close
 					end
 				end
 			rescue
@@ -226,6 +257,16 @@ class Volume < String
 				raise
 			end
 		end
+	end
+
+	# Return readable IO object for stream +name+.
+	def read_io(name)
+		open(File.join(path, name), 'rb')
+	end
+
+	# Return writable IO object for stream +name+.
+	def write_io(name)
+		open(File.join(path, name), 'wb')
 	end
 
 	# Create and register new Stream instance for the specified Source::File instance
@@ -242,7 +283,7 @@ class Volume < String
 	end
 
 	def cleanup!
-		FileUtils.rm_rf(@path) if !project.dry? && modified? && @cleanup
+		FileUtils.rm_rf(path) if !project.dry? && modified? && @cleanup
 	end
 
 	class Stream < String
@@ -256,11 +297,9 @@ class Volume < String
 		@@index = 36*36-1
 
 		def initialize(volume, file, compressor = nil)
-			super(file)
 			@volume = volume
-			#@obfuscate = true # Obfuscate & shorten stream name
 			@file = file
-			file_s = if @obfuscate
+			file_s = if volume.obfuscate?
 				f = (@@index+=1).to_s(36)
 				d = f.slice!(0, 2)
 				File.join(d, f)
@@ -271,9 +310,9 @@ class Volume < String
 			unless compressor.nil?
 				raise 'Unsupported compressor' unless @@compressor_ext.has_key?(compressor)
 				@flags << (@compressor = compressor)
-				file_s += ".#{@@compressor_ext[compressor]}" unless @obfuscate
+				file_s += ".#{@@compressor_ext[compressor]}" unless volume.obfuscate?
 			end
-			super(@obfuscate ? file_s : File.join(file.source, file_s))
+			super(volume.obfuscate? ? file_s : File.join(file.source, file_s))
 		end
 
 		def encode_with(coder)
@@ -281,9 +320,9 @@ class Volume < String
 		end
 
 		def to_h
-			opts = {'sha1' => sha1, 'volume' => volume}
-			opts['flags'] = @flags.to_a.join(' ') unless @flags.empty?
-			{to_s => opts}
+			stream = {'name' => to_s, 'volume' => volume, 'sha1' => sha1}
+			stream['flags'] = @flags.to_a.join(' ') unless @flags.empty?
+			stream
 		end
 
 		def sha1
@@ -299,9 +338,9 @@ class Manifest
 
 	Version = 0
 
-	# Find all manifest files in the destination
-	def self.manifests(dir)
-		Dir[File.join(dir, '*.yaml.gz')]
+	# Return all manifest files in the destination diectory
+	def self.manifests(project)
+		Dir[File.join(project.destination, '*.yaml.gz')]
 	end
 
 	def modified?; @modified end
