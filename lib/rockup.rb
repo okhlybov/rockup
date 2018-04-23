@@ -141,7 +141,7 @@ class Source < String
 
 		end
 
-		# (non-exhaustive list of) the most widely used packed file format extensions which are not subject to compression
+		# (non-exhaustive list of) the most widely used packed file format extensions which are not worth compressing
 
 		packed_audio = %w(aac ape flac gsm m4a m4b m4p mp3 mka mogg mpc oga ogg opus ra wma)
 
@@ -151,7 +151,9 @@ class Source < String
 
 		packed_archive = %w(7z s7z ace apk arc arj cab cfs dmg jar lzh lha lzx rar war wim zip zipx zpaq zz gz tgz bz2 tbz tbz2 lzma tlz xz txz)
 
-		skip = (packed_audio + packed_video + packed_image + packed_archive).join('|')
+		packed_document = %w(docx docm dotx dotm xlsx xlsm xltx xltm pptx pptm potx potm odt ott ods ots oth odm)
+
+		skip = (packed_audio + packed_video + packed_image + packed_archive + packed_document).join('|')
 
 		# Match files which are presumably not worth compressing
 		@@packed_exts = Regexp.new("\\.(#{skip})$", Regexp::IGNORECASE)
@@ -256,7 +258,7 @@ class Volume < String
 		def initialize(volume, file, compressor = nil)
 			super(file)
 			@volume = volume
-			@obfuscate = true # Obfuscate & shorten stream name
+			#@obfuscate = true # Obfuscate & shorten stream name
 			@file = file
 			file_s = if @obfuscate
 				f = (@@index+=1).to_s(36)
