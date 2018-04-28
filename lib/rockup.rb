@@ -15,10 +15,10 @@ Version = '0.1'
 
 # :nodoc:
 class Identity < Hash
-	def <<(o) self[o] = o end
+	def <<(o) has_key?(o) ? self[o] : self[o] = o end
 	def force(o) delete(o); self << o end
 	def to_json(*opts)
-		transform_values{ |o| o.to_json(*opts)}.to_json(*opts)
+		transform_values{ |o| o.to_json(*opts) }.to_json(*opts)
 	end
 end # 
 
@@ -41,8 +41,12 @@ class Project
 	def initialize(backup_dir)
 		@backup_dir = backup_dir
 		@sources = Identity.new
-		@volumes = Identity.new
+		@volumes = Identity.new; @volumes.default_proc = proc { |hash, id| hash << Volume.open(self, id) }
 		@manifests = Identity.new
+	end
+
+	def backup!(*srcs)
+		srcs.each { |src| (sources << Source.new(self, src)).update! }
 	end
 
 end # Project
@@ -71,6 +75,11 @@ class Source < String
 		@project = project
 		@root_dir = root_dir
 		@files = Identity.new
+	end
+
+	# Restore Source state from specified +hash+.
+	def self.from_hash(project, hash)
+		Source.new(project, hash['root'])
 	end
 
 	# Calls the specified block for each file recursively found in the #root_dir.
@@ -116,7 +125,7 @@ class Source < String
 		{
 			root: root_dir,
 			files: files
-		}.to_json(*opts)
+		}
 	end
 
 	# Represents a file within the Source hierarchy.
@@ -209,17 +218,72 @@ end # Source
 
 
 # Represents a collection of files in the backup destination directory processed at once.
+# Note that the volume is either read-only or write-only, but not both.
 class Volume < String
 
 	# Project instance owning this volume.
 	attr_reader :project
 
 	# Returns +true+ if the volume contents has been modified after it has been created or loaded.
-	def modified?; end
+	def modified?; @modified end
 
-	# Returns a list of volumes currently residing in the +project+ backup directory.
-	# The list contains plain file or directory names stripped of directory components.
-	def self.volumes(project) end
+	# Returns +true+ if the volume is newly created (does not already exist).
+	def new?; @new end
+
+	def initialize(project, id, new)
+		super(id)
+		@new = new
+		@project = project
+	end
+
+	# Returns a set of volumes currently residing in the +project+ backup directory.
+	# The set contains plain file or directory names stripped of directory components.
+	def self.volumes(project)
+		vs = Set.new
+		::Dir[File.join(project.backup_dir, '*')].each { |f| vs << File.basename(f) unless Volume.type(f).nil? }
+		vs
+	end
+
+	# Detect the volume type for specified +path+ or +nil+ if volume type is not recognized.
+	def self.type(path)
+		if File.directory?(path)
+			Dir
+		elsif File.exist?(path) && /\.cat$/ =~ path
+			Cat
+		else
+			nil
+		end
+	end
+
+	# Generate new unique ID for the volume.
+	# The ID is generated from current time.
+	def self.new_id; Manifest.new_id end
+
+	# Returns a Volume instance corresponding to given +path+.
+	def self.open(project, id)
+		raise 'Unrecognized volume type' if(v = Volume.type(File.join(project.backup_dir, id))).nil?
+		v.new(project, id)
+	end
+
+	# Represents a Volume where each backed file is stored separetely.
+	# This volume is most suitable for storing large files.
+	class Dir < Volume
+
+		def initialize(project, id = nil)
+			super(project, id.nil? ? Volume.new_id : id, id.nil?)
+		end
+
+	end # Dir
+
+	# Represents a Volume with all files concatenated together in a single file in a manner of `cat` utility.
+	# This volume is most suitable for storing many small files to circumvent file handling overhead.
+	class Cat < Volume
+
+		def initialize(project, id = nil)
+			super(project, id.nil? ? "#{Volume.new_id}.cat" : id, id.nil?)
+		end
+
+	end # Cat
 
 	# Represents a named entry in the Volume which identifies backed data.
 	class Stream < String
@@ -242,7 +306,7 @@ end # Volume
 
 
 # Represents the full state of the backup including metadata for all backed up files and associated streams.
-class Manifest
+class Manifest < String
 
 	# Manifest structure version this class reads and writes.
 	Version = 0
@@ -250,15 +314,82 @@ class Manifest
 	# Project instance owning this manifest.
 	attr_reader :project
 
-	# Full file name the manifest has been read or will be written to.
-	attr_reader :file_name
-
 	# Returns +true+ if the manifest contents has been modified after it has been created or loaded.
-	def modified?; end
+	def modified?
+		project.sources.each_key { |src| return true if src.modified? }
+		false
+	end
 
-	# Returns a list of manifests currently residing in the +project+ backup directory.
-	# The list contains plain file names stripped of directory components.
-	def self.manifests(project) end
+	# Returns +true+ if the manifest is newly created (does not already exist).
+	def new?; @new end
+
+	# Returns a set of manifests currently residing in the +project+ backup directory.
+	# The set contains plain file names stripped of directory components.
+	def self.manifests(project)
+		Set.new(Dir[File.join(project.backup_dir, '*.json.gz')].collect { |f| File.basename(f, '.json.gz') })
+	end
+
+	# Generate new unique ID for the manifest.
+	# The ID is generated from current time.
+	def self.new_id
+		(Time.now.to_f*100).to_i.to_s(36) # Millisecond scale should be enough
+	end
+
+	# Read existing manifest from file or create a new one.
+	def initialize(project, id = nil)
+		super(Manifest.new_id)
+		@new = id.nil?
+		@project = project
+		if new?
+			@session = self.to_s
+		else
+			read!(File.join(project.backup_dir, "#{id}.json.gz"))
+		end
+		@modified = true
+	end
+
+	# Load manifest from file.
+	private def read!(file_name)
+		open(file_name, 'rb') do |io|
+			Zlib::GzipReader.wrap(io) do |gz|
+				@json = JSON.parse(gz.read)
+				raise 'Unsupported manifest version' unless @json['version'] == Version
+				raise 'Missing session ID' if (@session = @json['session']).nil?
+			end
+		end
+	end
+
+	# Save newly created and modified manifest to file.
+	def store!
+		if modified?
+			@file_name = File.join(project.backup_dir, "#{self}.json.gz")
+			raise 'Refuse to overwrite existing manifest' unless new? || !File.exist?(@file_name)
+			begin
+				open(@file_name, 'wb') do |io|
+					Zlib::GzipWriter.wrap(io) do |gz|
+						gz.write(JSON.pretty_generate(self))
+					end
+				end
+			rescue
+				rollback! rescue nil
+				raise
+			end
+		end
+	end
+
+	# Reverts the filesystem in case of a failure by deleting newly created manifest.
+	def rollback!
+		FileUtils.rm_rf(@file_name) if modified?
+	end
+
+	def to_json(*opts)
+		{
+			version: Version,
+			mtime: Time.now,
+			session: @session,
+			sources: project.sources
+		}.to_json(*opts)
+	end
 
 end # Manifest
 
@@ -267,8 +398,7 @@ end # Rockup
 
 
 p = Rockup::Project.new('dst')
-s = Rockup::Source.new(p, '.')
+p.backup!('src')
 
-
-s.update!
-open("out.json", 'wt') {|io| io << JSON.pretty_generate(s)}
+m = Rockup::Manifest.new(p, Rockup::Manifest.manifests(p).sort.first)
+m.store!
