@@ -1,5 +1,6 @@
 require 'set'
 require 'zlib'
+require 'time'
 require 'json/ext'
 require 'fileutils'
 require 'securerandom'
@@ -16,7 +17,7 @@ Version = '0.1'
 # :nodoc:
 class Identity < Hash
 	def <<(o) has_key?(o) ? self[o] : self[o] = o end
-	def force(o) delete(o); self << o end
+	def force!(o) delete(o); self << o end
 	def to_json(*opts)
 		transform_values{ |o| o.to_json(*opts) }.to_json(*opts)
 	end
@@ -45,8 +46,19 @@ class Project
 		@manifests = Identity.new
 	end
 
-	def backup!(*srcs)
-		srcs.each { |src| (sources << Source.new(self, src)).update! }
+	def backup!(srcs, full = false)
+		# Load the latest manifest and continue the incremental backup if full backup is not requested
+		mf = manifests << Manifest.new(self, full ? nil : Manifest.manifests(self).sort.last)
+		# Restore the object tree from the manifest if it has been loaded from disk
+		mf.upload! unless mf.new?
+		# Actualize data loaded from the manifest from current state of filesystem
+		srcs.each { |dir| (sources << Source.new(self, dir)).update! }
+		# Commence the filesystem modification
+		begin
+			mf.store!
+		rescue
+			mf.rollback!
+		end
 	end
 
 end # Project
@@ -77,11 +89,6 @@ class Source < String
 		@files = Identity.new
 	end
 
-	# Restore Source state from specified +hash+.
-	def self.from_hash(project, hash)
-		Source.new(project, hash['root'])
-	end
-
 	# Calls the specified block for each file recursively found in the #root_dir.
 	def each_file(path = nil, &block)
 		Dir.entries(path.nil? ? root_dir : ::File.join(root_dir, path)).each do |entry|
@@ -100,25 +107,34 @@ class Source < String
 	# Update the data in #files with current state of filesystem.
 	# This method replaces old entries (with outdated modification times) and deletes non-existent entries.
 	def update!
-		# Tag current files as presumably dead
+		# Tag all current files as presumably dead
 		files.each_value { |f| f.live = false }
 		# Scan though the source directory for new/modified files
 		each_file do |f|
 			f.live = true
 			if files.include?(f)
 				if files[f].mtime < f.mtime
+					files.force!(f) # Remembered file is outdated, replace it
 					@modified = true
-					files.force(f) # Remembered file is outdated, replace it
 				else 
-					files[f].live = true # Remembered file is still actual, mark it as alive
+					files[f].live = true # Remembered file is still intact, mark it as alive
 				end
 			else
-				@modified = true
 				files << f
+				@modified = true
 			end
 		end
 		# Actually delete files not marked as live after the filesystem scan
 		files.delete_if { |f| f.live? ? false : @modified = true }
+	end
+
+	# Restore Source state from specified JSON hash +state+.
+	def self.from_json(project, id, state)
+		source = Source.new(project, state['root'], id)
+		state['files'].each do |file_s, state|
+			source.files.force!(File.from_json(source, file_s, state))
+		end
+		source
 	end
 
 	def to_json(*opts)
@@ -135,7 +151,8 @@ class Source < String
 		attr_reader :source
 
 		# Returns modification time of the file.
-		def mtime; @mtime ||= info.mtime end
+		# The time is rounded to seconds in order to be comparable with the time converted from string representation.
+		def mtime; @mtime ||= info.mtime.round end
 
 		# Returns file size.
 		def size; info.size end
@@ -145,9 +162,6 @@ class Source < String
 
 		# Returns full path to the file.
 		def file_path; ::File.join(source.root_dir, self) end
-		
-		# Returns +true+ if the file actually exists in the filesystem.
-		def extsts?; ::File.exist?(file_path) end
 		
 		# Returns +true+ if the file is worth compressing.
 		def compressible?
@@ -169,6 +183,15 @@ class Source < String
 
 		# :nodoc:
 		def live?; @live end
+
+		# Restore File state from specified JSON hash +state+.
+		def self.from_json(source, file_name, state)
+			file = File.new(source, file_name)
+			file.instance_variable_set(:@mtime, Time.parse(state['mtime']))
+			file.instance_variable_set(:@size, state['size'])
+			file.instance_variable_set(:@sha1, state['sha1'])
+			file
+		end
 
 		def to_json(*opts)
 			{
@@ -265,7 +288,7 @@ class Volume < String
 		v.new(project, id)
 	end
 
-	# Represents a Volume where each backed file is stored separetely.
+	# Represents a Volume where each backed file is stored separately.
 	# This volume is most suitable for storing large files.
 	class Dir < Volume
 
@@ -329,13 +352,13 @@ class Manifest < String
 		Set.new(Dir[File.join(project.backup_dir, '*.json.gz')].collect { |f| File.basename(f, '.json.gz') })
 	end
 
-	# Generate new unique ID for the manifest.
+	# Generates new unique ID for the manifest.
 	# The ID is generated from current time.
 	def self.new_id
-		(Time.now.to_f*100).to_i.to_s(36) # Millisecond scale should be enough
+		(Time.now.to_f*100).to_i.to_s(36) # Millisecond scale is thought to be enough
 	end
 
-	# Read existing manifest from file or create a new one.
+	# Reads existing manifest from file or create a new one if +id+ is +nil+.
 	def initialize(project, id = nil)
 		super(Manifest.new_id)
 		@new = id.nil?
@@ -345,10 +368,10 @@ class Manifest < String
 		else
 			read!(File.join(project.backup_dir, "#{id}.json.gz"))
 		end
-		@modified = true
 	end
 
-	# Load manifest from file.
+	# Loads manifest from file.
+	# Note that this does not automatically updates the project data structures. Refer to #upload! for details.
 	private def read!(file_name)
 		open(file_name, 'rb') do |io|
 			Zlib::GzipReader.wrap(io) do |gz|
@@ -359,7 +382,7 @@ class Manifest < String
 		end
 	end
 
-	# Save newly created and modified manifest to file.
+	# Saves newly created and modified manifest to file.
 	def store!
 		if modified?
 			@file_name = File.join(project.backup_dir, "#{self}.json.gz")
@@ -370,9 +393,9 @@ class Manifest < String
 						gz.write(JSON.pretty_generate(self))
 					end
 				end
-			rescue
+			rescue(e)
 				rollback! rescue nil
-				raise
+				raise(e)
 			end
 		end
 	end
@@ -380,6 +403,14 @@ class Manifest < String
 	# Reverts the filesystem in case of a failure by deleting newly created manifest.
 	def rollback!
 		FileUtils.rm_rf(@file_name) if modified?
+	end
+
+	# Uploads the state loaded from file into the project's data structures replacing all existing data.
+	# Note that uploading does not raise the modification flags for the structures it alters.
+	def upload!
+		@json['sources'].each do |source_s, state|
+			source = project.sources.force!(Source.from_json(project, source_s, state))
+		end
 	end
 
 	def to_json(*opts)
@@ -395,10 +426,3 @@ end # Manifest
 
 
 end # Rockup
-
-
-p = Rockup::Project.new('dst')
-p.backup!('src')
-
-m = Rockup::Manifest.new(p, Rockup::Manifest.manifests(p).sort.first)
-m.store!

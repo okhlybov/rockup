@@ -5,6 +5,7 @@ require 'optparse'
 
 opts = {
 	mode: :backup,
+	full: false,
 	compress: :auto
 }
 
@@ -17,12 +18,9 @@ OptionParser.new do |parser|
 		exit
 	end
 
-	parser.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do
-		opts[:mode] = :backup
-	end
+	parser.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do	end
 
 	parser.on('-B', 'Force full backup') do
-		opts[:mode] = :backup
 		opts[:full] = true
 	end
 
@@ -50,15 +48,15 @@ srcdirs = ARGV
 
 raise 'Backup directory must be specified' if backupdir.nil?
 
-project = Rockup::Project.new(srcdirs, backupdir)
+project = Rockup::Project.new(backupdir)
 
-project.dry = opts[:dry]
-project.compress = opts[:compress]
+#project.dry = opts[:dry]
+#project.compress = opts[:compress]
 
 case opts[:mode]
 when :backup
 	raise 'At least one source directory must be specified' if srcdirs.empty?
-	project.backup!(!opts[:full])
+	project.backup!(srcdirs, opts[:full])
 when :restore
 	project.restore!(opts[:restore])
 end
