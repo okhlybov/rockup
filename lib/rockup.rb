@@ -3,6 +3,7 @@ require 'zlib'
 require 'time'
 require 'json/ext'
 require 'fileutils'
+require 'ostruct'
 require 'securerandom'
 
 
@@ -39,25 +40,126 @@ class Project
 	# Set of Manifest objects attached to project.
 	attr_reader :manifests
 
+	VolumeTypes = Set[:auto, :copy, :cat]
+
+	# Volume type used for back up.
+	attr_reader :volume_type
+
+	def volume_type=(type)
+		raise 'Unsupported volume type' unless VolumeTypes.include?(type)
+		@volume_type = type
+	end
+
+	# Allowed stream compression strategies.
+	Compression = Set[:auto, :enforce, :disable]
+
+	# Stream compression strategy.
+	attr_reader :compression
+
+	# Set the stream compression strategy. Refer to Compression for available options.
+	def compression=(strategy)
+		raise 'Unsupported compression strategy' unless Compression.include?(strategy)
+		@compression = strategy
+	end
+
+	# Supported stream compressors.
+	Compressor = Set[nil, :gzip]
+
+	CompressorExt = {gzip: '.gz'}
+
+	# Return +true+ when stream name obfuscation is employed.
+	def obfuscate?;	@obfuscate end
+
 	def initialize(backup_dir)
 		@backup_dir = backup_dir
 		@sources = Identity.new
-		@volumes = Identity.new; @volumes.default_proc = proc { |hash, id| hash << Volume.open(self, id) }
+		@volumes = Identity.new
 		@manifests = Identity.new
+		self.volume_type = :auto
+		self.compression = :disable #:auto
+		#@obfuscate = true
+	end
+
+	# Compute file statistics
+	def self.stats(files)
+		total_file_size = 0 # Total size of all files
+		avg_file_size = 0 # Average file size
+		total_stream_size = 0 # Estimated size of all compressed streams
+		files.each do |file|
+			total_file_size += (size = file.size)
+			total_stream_size += file.compressed_size
+			avg_file_size += size
+		end
+		avg_file_size = avg_file_size/files.size
+		OpenStruct.new(
+			file_count: files.size,
+			file_size: total_file_size,
+			avg_file_size: avg_file_size,
+			stream_size: total_stream_size
+		)
 	end
 
 	def backup!(srcs, full = false)
 		# Load the latest manifest and continue the incremental backup if full backup is not requested
 		mf = manifests << Manifest.new(self, full ? nil : Manifest.manifests(self).sort.last)
-		# Restore the object tree from the manifest if it has been loaded from disk
+		# Restore the object tree from the manifest if it has been loaded from file
 		mf.upload! unless mf.new?
-		# Actualize data loaded from the manifest from current state of filesystem
+		# Actualize data loaded from the manifest with current state of the filesystem
 		srcs.each { |dir| (sources << Source.new(self, dir)).update! }
+		# Select files which have no associated stream and therefore are the subject to back up
+		files = []
+		sources.each_key do |source|
+			source.files.each_key do |file|
+				files << file if file.stream.nil? && file.size > 0
+			end
+		end
+		# Determine backup strategy
+		copy_files = [] # Files to be copied
+		cat_files = [] # Files to be coalesced
+		cat_files_thrs = 1024**3 # Coalesced files size threshold
+		large_file_thrs = 1024**2 # Large file size threshold
+		case volume_type
+		when :auto
+			# Put large files into separate streams, coalesce small files into single volume
+			sorted = files.sort{ |a, b| a.compressed_size <=> b.compressed_size }
+			cat_files_size = 0
+			while !(file = sorted.shift).nil? && cat_files_size < cat_files_thrs && file.compressed_size < large_file_thrs
+				cat_files_size += file.compressed_size
+				cat_files << file
+			end
+			copy_files = sorted
+		when :cat
+			cat_files = files
+		when :copy
+			copy_files = files
+		else
+			raise
+		end
+		cat_volume = volumes << Cat.new(self) unless cat_files.empty?
+		copy_volume = volumes << Copy.new(self) unless copy_files.empty?
 		# Commence the filesystem modification
 		begin
+			copy_files!(copy_files, copy_volume)
+			copy_files!(cat_files, cat_volume)
 			mf.store!
 		rescue
-			mf.rollback!
+			mf.rollback! rescue nil
+			cat_volume.rollback! rescue nil
+			copy_volume.rollback! rescue nil
+			raise
+		end
+	end
+
+	private def copy_files!(files, volume)
+		files.each do |file|
+			rs = open(file.file_path, 'rb')
+			ws = volume.stream(file).writer
+			begin
+				FileUtils.copy_stream(rs, ws)
+			ensure
+				rs.close
+				ws.close
+			end
 		end
 	end
 
@@ -83,7 +185,7 @@ class Source < String
 	# Create new Source instance.
 	# Set the source identifier to +id+ if it's not +nil+ otherwise generate new stable identifier reflecting the #root_dir.
 	def initialize(project, root_dir, id = nil)
-		super(id.nil? ? Zlib.crc32(root_dir).to_s(16) : id)
+		super(id.nil? ? Zlib.crc32(root_dir).to_s(36) : id)
 		@project = project
 		@root_dir = root_dir
 		@files = Identity.new
@@ -150,6 +252,9 @@ class Source < String
 		# Source instance owning this file.
 		attr_reader :source
 
+		# Stream which backs up the file.
+		attr_reader :stream
+
 		# Returns modification time of the file.
 		# The time is rounded to seconds in order to be comparable with the time converted from string representation.
 		def mtime; @mtime ||= info.mtime.round end
@@ -169,10 +274,15 @@ class Source < String
 			size*File.compression_ratio(self) + 18 + (to_s.size+1) < size # 18 bytes is the minimum GZip overhead
 		end
 
+		# Return estimated file size after compression
+		def compressed_size
+			@compressed_size ||= (size*File.compression_ratio(self)).to_i
+		end
+
 		# Create new File instance.
-		# +file_name+ is expected to be relative to Source#root_dir
-		def initialize(source, file_name)
-			super(file_name)
+		# +name+ is expected to be relative to Source#root_dir
+		def initialize(source, name)
+			super(name)
 			@source = source
 		end
 
@@ -183,6 +293,12 @@ class Source < String
 
 		# :nodoc:
 		def live?; @live end
+
+		# Attaches Stream object backing the file.
+		def stream=(stream)
+			raise 'Stream is already attached' unless @stream.nil?
+			@stream = stream
+		end
 
 		# Restore File state from specified JSON hash +state+.
 		def self.from_json(source, file_name, state)
@@ -259,18 +375,22 @@ class Volume < String
 		@project = project
 	end
 
+	def rollback!
+		FileUtils.rm_rf(File.join(project.backup_dir, self)) if modified?
+	end
+
 	# Returns a set of volumes currently residing in the +project+ backup directory.
 	# The set contains plain file or directory names stripped of directory components.
 	def self.volumes(project)
 		vs = Set.new
-		::Dir[File.join(project.backup_dir, '*')].each { |f| vs << File.basename(f) unless Volume.type(f).nil? }
+		Dir[File.join(project.backup_dir, '*')].each { |f| vs << File.basename(f) unless Volume.type(f).nil? }
 		vs
 	end
 
 	# Detect the volume type for specified +path+ or +nil+ if volume type is not recognized.
 	def self.type(path)
 		if File.directory?(path)
-			Dir
+			Copy
 		elsif File.exist?(path) && /\.cat$/ =~ path
 			Cat
 		else
@@ -282,31 +402,11 @@ class Volume < String
 	# The ID is generated from current time.
 	def self.new_id; Manifest.new_id end
 
-	# Returns a Volume instance corresponding to given +path+.
+	# Returns a Volume instance corresponding to given +id+.
 	def self.open(project, id)
 		raise 'Unrecognized volume type' if(v = Volume.type(File.join(project.backup_dir, id))).nil?
 		v.new(project, id)
 	end
-
-	# Represents a Volume where each backed file is stored separately.
-	# This volume is most suitable for storing large files.
-	class Dir < Volume
-
-		def initialize(project, id = nil)
-			super(project, id.nil? ? Volume.new_id : id, id.nil?)
-		end
-
-	end # Dir
-
-	# Represents a Volume with all files concatenated together in a single file in a manner of `cat` utility.
-	# This volume is most suitable for storing many small files to circumvent file handling overhead.
-	class Cat < Volume
-
-		def initialize(project, id = nil)
-			super(project, id.nil? ? "#{Volume.new_id}.cat" : id, id.nil?)
-		end
-
-	end # Cat
 
 	# Represents a named entry in the Volume which identifies backed data.
 	class Stream < String
@@ -323,9 +423,121 @@ class Volume < String
 		# Modification time of the file backed into the stream.
 		attr_reader :mtime
 
+		# Compressor employed to compress the stream. Refer to Project::Compressor for available options.
+		attr_reader :compressor
+
+		protected def compressor=(type)
+			raise 'Unsupported compressor' unless Project::Compressor.include?(type)
+			@compressor = type
+		end
+
+		# Returns +true+ if stream is compressed.
+		def compressed?; !@compressor.nil? end
+
+		def initialize(volume, file, name)
+			super(name)
+			@file = file
+			@volume = volume
+			self.compressor = case volume.project.compression
+				when :auto
+					file.compressible? ? :gzip : nil
+				when :enforce
+					:gzip
+				when :disable
+					nil
+				else
+					raise
+			end
+		end
+
 	end # Stream
 
 end # Volume
+
+
+# Represents a Volume where each backed file is stored in separate stream file.
+# This volume is most suitable for storing large files.
+class Copy < Volume
+
+	def initialize(project, id = nil)
+		super(project, id.nil? ? Volume.new_id : id, id.nil?)
+	end
+
+	def modify!; @modified = true end
+
+	def stream(file) Stream.new(self, file) end
+
+	class Stream < Volume::Stream
+
+		def initialize(volume, file)
+			name = if volume.project.obfuscate?
+				# TODO ensure that generated name is actually unique
+				x = SecureRandom.random_number(2**32).to_s(36)
+				File.join(x.slice!(0, 2), x)
+			else
+				compressed? ? "#{file}#{Project::CompressorExt[compressor]}" : file
+			end
+			super(volume, file, name)
+		end
+
+		# Returns IO object to write the source file to.
+		def writer
+			if @writer.nil?
+				volume.modify!
+				full_path = File.join(volume.project.backup_dir, volume, file.source, self)
+				raise 'Refuse to overwrite existing stream file' if File.exist?(full_path)
+				FileUtils.mkdir_p(File.dirname(full_path))
+				@writer = open(full_path, 'wb')
+			else
+				@writer
+			end
+		end
+
+	end # Stream
+
+end # Copy
+
+
+# Represents a Volume with all files coalesced together in a single file in a manner of `cat` utility.
+# This volume is most suitable for storing many small files to circumvent file handling overhead.
+class Cat < Volume
+
+	def initialize(project, id = nil)
+		@index = 0
+		super(project, id.nil? ? "#{Volume.new_id}.cat" : id, id.nil?)
+	end
+
+	def new_index; @index += 1 end
+
+	def stream(file) Stream.new(self, file) end
+
+	def writer
+		if @writer.nil?
+			@modified = true
+			@writer = open(File.join(project.backup_dir, self), 'wb')
+		else
+			@writer
+		end
+	end
+
+	class Stream < Volume::Stream
+
+		def initialize(volume, file)
+			super(volume, file, volume.new_index.to_s)
+		end
+
+		# Returns IO object to write the source file to.
+		def writer
+			ws = volume.writer
+			class << ws
+				def close; end # Have to disable stream closing for shared Cat writer IO since Project#backup! tries to close it after every file copy operation
+			end
+			ws
+		end
+
+	end # Stream
+
+end # Cat
 
 
 # Represents the full state of the backup including metadata for all backed up files and associated streams.
@@ -349,7 +561,7 @@ class Manifest < String
 	# Returns a set of manifests currently residing in the +project+ backup directory.
 	# The set contains plain file names stripped of directory components.
 	def self.manifests(project)
-		Set.new(Dir[File.join(project.backup_dir, '*.json.gz')].collect { |f| File.basename(f, '.json.gz') })
+		Set.new(::Dir[File.join(project.backup_dir, '*.json.gz')].collect { |f| File.basename(f, '.json.gz') })
 	end
 
 	# Generates new unique ID for the manifest.
@@ -387,15 +599,10 @@ class Manifest < String
 		if modified?
 			@file_name = File.join(project.backup_dir, "#{self}.json.gz")
 			raise 'Refuse to overwrite existing manifest' unless new? || !File.exist?(@file_name)
-			begin
-				open(@file_name, 'wb') do |io|
-					Zlib::GzipWriter.wrap(io) do |gz|
-						gz.write(JSON.pretty_generate(self))
-					end
+			open(@file_name, 'wb') do |io|
+				Zlib::GzipWriter.wrap(io) do |gz|
+					gz.write(JSON.pretty_generate(self))
 				end
-			rescue(e)
-				rollback! rescue nil
-				raise(e)
 			end
 		end
 	end

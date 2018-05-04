@@ -34,7 +34,7 @@ OptionParser.new do |parser|
 	end
 
 	parser.on('--compress', 'Enforce compression of backed data') do
-		opts[:compress] = :force
+		opts[:compress] = :enforce
 	end
 
 	parser.on('--no-compress', 'Disable compression of backed data') do
