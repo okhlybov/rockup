@@ -76,7 +76,7 @@ class Project
 		@volumes = Identity.new
 		@manifests = Identity.new
 		self.volume_type = :auto
-		self.compression = :disable #:auto
+		self.compression = :auto
 		#@obfuscate = true
 	end
 
@@ -135,8 +135,8 @@ class Project
 		else
 			raise
 		end
-		cat_volume = volumes << Cat.new(self) unless cat_files.empty?
-		copy_volume = volumes << Copy.new(self) unless copy_files.empty?
+		cat_volume = volumes << Cat.new(self)
+		copy_volume = volumes << Copy.new(self)
 		# Commence the filesystem modification
 		begin
 			copy_files!(copy_files, copy_volume)
@@ -379,6 +379,20 @@ class Volume < String
 		FileUtils.rm_rf(File.join(project.backup_dir, self)) if modified?
 	end
 
+	# Returns compressor for +file+ according to current policy.
+	def compressor(file)
+		case project.compression
+		when :auto
+			file.compressible? ? :gzip : nil
+		when :enforce
+			:gzip
+		when :disable
+			nil
+		else
+			raise
+		end
+	end
+
 	# Returns a set of volumes currently residing in the +project+ backup directory.
 	# The set contains plain file or directory names stripped of directory components.
 	def self.volumes(project)
@@ -426,11 +440,6 @@ class Volume < String
 		# Compressor employed to compress the stream. Refer to Project::Compressor for available options.
 		attr_reader :compressor
 
-		protected def compressor=(type)
-			raise 'Unsupported compressor' unless Project::Compressor.include?(type)
-			@compressor = type
-		end
-
 		# Returns +true+ if stream is compressed.
 		def compressed?; !@compressor.nil? end
 
@@ -438,16 +447,7 @@ class Volume < String
 			super(name)
 			@file = file
 			@volume = volume
-			self.compressor = case volume.project.compression
-				when :auto
-					file.compressible? ? :gzip : nil
-				when :enforce
-					:gzip
-				when :disable
-					nil
-				else
-					raise
-			end
+			@compressor = volume.compressor(file)
 		end
 
 	end # Stream
@@ -475,21 +475,32 @@ class Copy < Volume
 				x = SecureRandom.random_number(2**32).to_s(36)
 				File.join(x.slice!(0, 2), x)
 			else
-				compressed? ? "#{file}#{Project::CompressorExt[compressor]}" : file
+				# Can't use #compressed? here because it is set in the base class' constructor which hasn't been called yet
+				ext = Project::CompressorExt[volume.compressor(file)]
+				ext.nil? ? file : "#{file}#{ext}"
 			end
 			super(volume, file, name)
 		end
 
-		# Returns IO object to write the source file to.
+		# Returns new IO object to write the source file to.
 		def writer
-			if @writer.nil?
-				volume.modify!
-				full_path = File.join(volume.project.backup_dir, volume, file.source, self)
-				raise 'Refuse to overwrite existing stream file' if File.exist?(full_path)
-				FileUtils.mkdir_p(File.dirname(full_path))
-				@writer = open(full_path, 'wb')
-			else
-				@writer
+			volume.modify!
+			full_path = volume.project.obfuscate? ? File.join(volume.project.backup_dir, volume, self) : File.join(volume.project.backup_dir, volume, file.source, self)
+			raise 'Refuse to overwrite existing stream file' if File.exist?(full_path)
+			FileUtils.mkdir_p(File.dirname(full_path))
+			writer = open(full_path, 'wb')
+			compressed? ? GzipWriter.new(writer) : writer
+		end
+
+		# Auxillary Gzip Writer which closes the chained IO
+		class GzipWriter < Zlib::GzipWriter
+			def initialize(io, *opts)
+				super
+				@chained_io = io
+			end
+			def close
+				super
+				@chained_io.close
 			end
 		end
 
@@ -529,7 +540,9 @@ class Cat < Volume
 		end
 
 		# Returns IO object to write the source file to.
-		def writer; volume.writer end
+		def writer
+			compressed? ? Zlib::GzipWriter.new(volume.writer) : volume.writer
+		end
 
 	end # Stream
 
