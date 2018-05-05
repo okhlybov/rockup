@@ -515,9 +515,11 @@ class Cat < Volume
 		if @writer.nil?
 			@modified = true
 			@writer = open(File.join(project.backup_dir, self), 'wb')
-		else
-			@writer
+			class << @writer
+				def close; end # Have to disable stream closing for shared Cat writer IO since Project#backup! tries to close it after every file copy operation
+			end
 		end
+		@writer
 	end
 
 	class Stream < Volume::Stream
@@ -527,13 +529,7 @@ class Cat < Volume
 		end
 
 		# Returns IO object to write the source file to.
-		def writer
-			ws = volume.writer
-			class << ws
-				def close; end # Have to disable stream closing for shared Cat writer IO since Project#backup! tries to close it after every file copy operation
-			end
-			ws
-		end
+		def writer; volume.writer end
 
 	end # Stream
 
