@@ -12,7 +12,7 @@ module Rockup
 
 
 # Module version.
-Version = '0.1'
+Version = '0.1.0'
 
 
 # :nodoc:
@@ -65,6 +65,7 @@ class Project
 	# Supported stream compressors.
 	Compressor = Set[nil, :gzip]
 
+	# :nodoc:
 	CompressorExt = {gzip: '.gz'}
 
 	# Return +true+ when stream name obfuscation is employed.
@@ -121,12 +122,13 @@ class Project
 		case volume_type
 		when :auto
 			# Put large files into separate streams, coalesce small files into single volume
-			sorted = files.sort{ |a, b| a.compressed_size <=> b.compressed_size }
+			sorted = files.sort { |a, b| a.compressed_size <=> b.compressed_size } # Small files come first
 			cat_files_size = 0
 			while !(file = sorted.shift).nil? && cat_files_size < cat_files_thrs && file.compressed_size < large_file_thrs
 				cat_files_size += file.compressed_size
 				cat_files << file
 			end
+			sorted.unshift(file) unless file.nil?
 			copy_files = sorted
 		when :cat
 			cat_files = files
@@ -153,7 +155,8 @@ class Project
 	private def copy_files!(files, volume)
 		files.each do |file|
 			rs = open(file.file_path, 'rb')
-			ws = volume.stream(file).writer
+			file.stream = volume.stream(file)
+			ws = file.stream.writer
 			begin
 				FileUtils.copy_stream(rs, ws)
 			ensure
@@ -301,20 +304,29 @@ class Source < String
 		end
 
 		# Restore File state from specified JSON hash +state+.
-		def self.from_json(source, file_name, state)
-			file = File.new(source, file_name)
-			file.instance_variable_set(:@mtime, Time.parse(state['mtime']))
-			file.instance_variable_set(:@size, state['size'])
-			file.instance_variable_set(:@sha1, state['sha1'])
-			file
+		def self.from_json(source, file_s, state)
+			File.new(source, file_s).from_json(state)
+		end
+
+		def from_json(state)
+			@mtime = Time.parse(state['mtime'])
+			@size = (sz = state['size']).nil? ? 0 : sz
+			unless sz.nil?
+				@sha1 = state['sha1']
+				stream = Volume::Stream.from_json(self, state['stream'])
+			end
+			self
 		end
 
 		def to_json(*opts)
-			{
-				size: size,
-				mtime: mtime,
-				sha1: sha1
-			}
+			hash = {mtime: mtime}
+			# The fields below are meaningful for non-zero files only
+			if size > 0
+				hash[:size] = size
+				hash[:sha1] = sha1
+				hash[:stream] = stream unless stream.nil?
+			end
+			hash
 		end
 
 		# Return floating-point value of presumed compression ratio for the +file_name+ as follows: compressed_size == compression_ratio*uncompressed_size.
@@ -393,6 +405,11 @@ class Volume < String
 		end
 	end
 
+	# :nodoc:
+	def stream(stream)
+		stream.file.stream = stream
+	end
+
 	# Returns a set of volumes currently residing in the +project+ backup directory.
 	# The set contains plain file or directory names stripped of directory components.
 	def self.volumes(project)
@@ -434,21 +451,41 @@ class Volume < String
 		# String representation of the +SHA1+ signature of the stream contents.
 		attr_reader :sha1
 
-		# Modification time of the file backed into the stream.
-		attr_reader :mtime
-
 		# Compressor employed to compress the stream. Refer to Project::Compressor for available options.
 		attr_reader :compressor
 
 		# Returns +true+ if stream is compressed.
 		def compressed?; !@compressor.nil? end
 
-		def initialize(volume, file, name)
-			super(name)
+		def initialize(volume, file, id)
+			super(id)
 			@file = file
 			@volume = volume
 			@compressor = volume.compressor(file)
 		end
+
+		# Restore Stream state from specified JSON hash +state+.
+		def self.from_json(file, state)
+			project = file.source.project
+			stream = (project.volumes << Volume.open(project, state['volume'])).stream(file)
+			stream.from_json(state)
+		end
+
+		# Represents an IO-like class which computes the SHA1 checksum of processed data.
+		class SHA1Computer
+			attr_reader :sha1
+			def initialize(io)
+				@sha1 = Digest::SHA1.new
+				@io = io
+			end
+			def write(data)
+				@sha1.update(data)
+				@io.write(data)
+			end
+			def close
+				@io.close
+			end
+		end # SHA1Computer
 
 	end # Stream
 
@@ -465,21 +502,25 @@ class Copy < Volume
 
 	def modify!; @modified = true end
 
-	def stream(file) Stream.new(self, file) end
+	def stream(file)
+		super(Stream.new(self, file))
+	end
 
 	class Stream < Volume::Stream
 
-		def initialize(volume, file)
-			name = if volume.project.obfuscate?
-				# TODO ensure that generated name is actually unique
-				x = SecureRandom.random_number(2**32).to_s(36)
-				File.join(x.slice!(0, 2), x)
-			else
-				# Can't use #compressed? here because it is set in the base class' constructor which hasn't been called yet
-				ext = Project::CompressorExt[volume.compressor(file)]
-				ext.nil? ? file : "#{file}#{ext}"
+		def initialize(volume, file, id = nil)
+			if id.nil?
+				id = if volume.project.obfuscate?
+					# TODO ensure that generated name is actually unique
+					x = SecureRandom.random_number(2**32).to_s(36)
+					File.join(x.slice!(0, 2), x)
+				else
+					# Can't use #compressed? here because it is set in the base class' constructor which is yet to be called
+					ext = Project::CompressorExt[volume.compressor(file)]
+					ext.nil? ? file : "#{file}#{ext}"
+				end
 			end
-			super(volume, file, name)
+			super(volume, file, id)
 		end
 
 		# Returns new IO object to write the source file to.
@@ -488,11 +529,25 @@ class Copy < Volume
 			full_path = volume.project.obfuscate? ? File.join(volume.project.backup_dir, volume, self) : File.join(volume.project.backup_dir, volume, file.source, self)
 			raise 'Refuse to overwrite existing stream file' if File.exist?(full_path)
 			FileUtils.mkdir_p(File.dirname(full_path))
-			writer = open(full_path, 'wb')
-			compressed? ? GzipWriter.new(writer) : writer
+			@writer = SHA1Computer.new(open(full_path, 'wb'))
+			compressed? ? GzipWriter.new(@writer) : @writer
 		end
 
-		# Auxillary Gzip Writer which closes the chained IO
+		def from_json(state)
+			@sha1 = state['sha1']
+			self
+		end
+
+		def to_json(*opts)
+			{
+				name: self.to_s,
+				volume: volume,
+				sha1: @writer.sha1
+			}.to_json(*opts)
+		end
+
+		# :nodoc:
+		# Auxillary Gzip Writer which closes the chained IO when closing self
 		class GzipWriter < Zlib::GzipWriter
 			def initialize(io, *opts)
 				super
@@ -502,7 +557,7 @@ class Copy < Volume
 				super
 				@chained_io.close
 			end
-		end
+		end # GzipWriter
 
 	end # Stream
 
@@ -520,7 +575,9 @@ class Cat < Volume
 
 	def new_index; @index += 1 end
 
-	def stream(file) Stream.new(self, file) end
+	def stream(file)
+		super(Stream.new(self, file))
+	end
 
 	def writer
 		if @writer.nil?
@@ -535,14 +592,45 @@ class Cat < Volume
 
 	class Stream < Volume::Stream
 
-		def initialize(volume, file)
-			super(volume, file, volume.new_index.to_s)
+		def initialize(volume, file, id = nil)
+			super(volume, file, id.nil? ? volume.new_index.to_s : id)
 		end
 
 		# Returns IO object to write the source file to.
 		def writer
-			compressed? ? Zlib::GzipWriter.new(volume.writer) : volume.writer
+			@writer = Writer.new(volume.writer)
+			compressed? ? Zlib::GzipWriter.new(@writer) : @writer
 		end
+
+		def from_json(state)
+			@size = state['size']
+			@offset = state['offset']
+			@sha1 = state['sha1']
+			self
+		end
+
+		def to_json(*opts)
+			{
+				volume: volume,
+				offset: @offset = @writer.offset,
+				size: @size = @writer.size,
+				sha1: @sha1 = @writer.sha1
+			}.to_json(*opts)
+		end
+
+		# :nodoc:
+		class Writer < SHA1Computer
+			attr_reader :size, :offset
+			def initialize(io)
+				super
+				@size = 0
+				@offset = @io.pos
+			end
+			def write(data)
+				@size += data.size
+				super
+			end
+		end # Writer
 
 	end # Stream
 
