@@ -6,7 +6,7 @@ require 'optparse'
 opts = {
 	mode: :backup,
 	full: false,
-	compress: :auto
+	compression: :auto
 }
 
 OptionParser.new do |parser|
@@ -34,11 +34,11 @@ OptionParser.new do |parser|
 	end
 
 	parser.on('--compress', 'Enforce compression of backed data') do
-		opts[:compress] = :enforce
+		opts[:compression] = :enforce
 	end
 
 	parser.on('--no-compress', 'Disable compression of backed data') do
-		opts[:compress] = :disable
+		opts[:compression] = :disable
 	end
 
 end.parse!
@@ -51,7 +51,7 @@ raise 'Backup directory must be specified' if backupdir.nil?
 project = Rockup::Project.new(backupdir)
 
 #project.dry = opts[:dry]
-#project.compress = opts[:compress]
+project.compression = opts[:compression]
 
 case opts[:mode]
 when :backup
