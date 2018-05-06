@@ -1,9 +1,9 @@
 require 'set'
 require 'zlib'
 require 'time'
+require 'digest'
 require 'json/ext'
 require 'fileutils'
-require 'ostruct'
 require 'securerandom'
 
 
@@ -130,6 +130,7 @@ class Project
 			end
 			sorted.unshift(file) unless file.nil?
 			copy_files = sorted
+			copy_files << cat_files.shift if cat_files.size == 1
 		when :cat
 			cat_files = files
 		when :copy
@@ -405,11 +406,6 @@ class Volume < String
 		end
 	end
 
-	# :nodoc:
-	def stream(stream)
-		stream.file.stream = stream
-	end
-
 	# Returns a set of volumes currently residing in the +project+ backup directory.
 	# The set contains plain file or directory names stripped of directory components.
 	def self.volumes(project)
@@ -502,9 +498,8 @@ class Copy < Volume
 
 	def modify!; @modified = true end
 
-	def stream(file)
-		super(Stream.new(self, file))
-	end
+	  
+	def stream(file) Stream.new(self, file) end
 
 	class Stream < Volume::Stream
 
@@ -564,7 +559,7 @@ class Copy < Volume
 end # Copy
 
 
-# Represents a Volume with all files coalesced together in a single file in a manner of `cat` utility.
+# Represents a Volume with all files coalesced together into a single file in a manner of the +cat+ utility.
 # This volume is most suitable for storing many small files to circumvent file handling overhead.
 class Cat < Volume
 
@@ -575,9 +570,7 @@ class Cat < Volume
 
 	def new_index; @index += 1 end
 
-	def stream(file)
-		super(Stream.new(self, file))
-	end
+	def stream(file) Stream.new(self, file) end
 
 	def writer
 		if @writer.nil?
