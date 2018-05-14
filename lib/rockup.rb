@@ -2,6 +2,7 @@ require 'set'
 require 'zlib'
 require 'time'
 require 'digest'
+require 'logger'
 require 'json/ext'
 require 'fileutils'
 require 'securerandom'
@@ -16,9 +17,36 @@ Version = '0.1.0'
 
 
 # :nodoc:
+module Log
+	@@logger = Logger.new(STDOUT)
+	@@logger.level = Logger::WARN
+	def self.level=(level) @@logger.level = level end
+	def self.debug(*args, &block) @@logger.debug(*args, &block) end
+	def self.info(*args, &block) @@logger.info(*args, &block) end
+	def self.warn(*args, &block) @@logger.warn(*args, &block) end
+	def self.error(*args, &block) @@logger.error(*args, &block) end
+	def self.fatal(*args, &block) @@logger.fatal(*args, &block); raise *args end
+end # Log
+
+
+# :nodoc:
 class Identity < Hash
-	def <<(o) has_key?(o) ? self[o] : self[o] = o end
-	def force!(o) delete(o); self << o end
+	private def log_reuse(o) Log.debug "reusing existing object `#{o}`" end
+	private def log_replace(o) Log.debug "replacing existing object with `#{o}`" end
+	def <<(o)
+		if has_key?(o)
+			log_reuse(o)
+			self[o]
+		else
+			log_replace(o)
+			self[o] = o
+		end
+	end
+	def force!(o)
+		Log.debug "forced replacement of existing object with `#{o}`"
+		delete(o)
+		self << o
+	end
 	def to_json(*opts)
 		transform_values{ |o| o.to_json(*opts) }.to_json(*opts)
 	end
@@ -29,7 +57,7 @@ end #
 class Project
 
 	# Directory where backups are stored.
-  attr_reader :backup_dir
+	attr_reader :backup_dir
 
 	# Set of Source directory objects attached to project.
 	attr_reader :sources
@@ -46,20 +74,22 @@ class Project
 	attr_reader :volume_type
 
 	def volume_type=(type)
-		raise 'Unsupported volume type' unless VolumeTypes.include?(type)
+		Log.fatal "unsupported volume type :#{type}" unless VolumeTypes.include?(type)
 		@volume_type = type
+		Log.debug "volume type set to :#{type}"
 	end
 
-	# Allowed stream compression strategies.
-	Compression = Set[:auto, :enforce, :disable]
+	# Allowed stream compression policies.
+	Compressions = Set[:auto, :enforce, :disable]
 
 	# Stream compression strategy.
 	attr_reader :compression
 
 	# Set the stream compression strategy. Refer to Compression for available options.
-	def compression=(strategy)
-		raise 'Unsupported compression strategy' unless Compression.include?(strategy)
-		@compression = strategy
+	def compression=(policy)
+		Log.fatal "unsupported compression policy :#{policy}" unless Compressions.include?(policy)
+		@compression = policy
+		Log.debug "compression policy set to :#{policy}"
 	end
 
 	# Supported stream compressors.
@@ -72,6 +102,7 @@ class Project
 	def obfuscate?;	@obfuscate end
 
 	def initialize(backup_dir)
+		Log.info 'initializing project'
 		@backup_dir = backup_dir
 		@sources = Identity.new
 		@volumes = Identity.new
@@ -101,17 +132,29 @@ class Project
 	end
 
 	def backup!(srcs, full = false)
+		Log.info 'starting backup'
+		Log.fatal "backup directory `#{backup_dir}` does not exist" unless File.directory?(backup_dir)
 		# Load the latest manifest and continue the incremental backup if full backup is not requested
+		Log.info 'processing manifest'
 		mf = manifests << Manifest.new(self, full ? nil : Manifest.manifests(self).sort.last)
 		# Restore the object tree from the manifest if it has been loaded from file
 		mf.upload! unless mf.new?
 		# Actualize data loaded from the manifest with current state of the filesystem
-		srcs.each { |dir| (sources << Source.new(self, dir)).update! }
+		Log.info 'examining file system state'
+		srcs.each do |dir|
+			(sources << Source.new(self, dir)).update!
+		end
 		# Select files which have no associated stream and therefore are the subject to back up
 		files = []
+		Log.info 'building list of files to back up'
 		sources.each_key do |source|
+			Log.info "processing source directory `#{source.root_dir}`"
 			source.files.each_key do |file|
-				files << file if file.stream.nil? && file.size > 0
+				Log.debug "examining file `#{file}`"
+				if file.stream.nil? && file.size > 0
+					Log.info "registering file `#{file}` for back up"
+					files << file
+				end
 			end
 		end
 		# Determine backup strategy
@@ -122,8 +165,10 @@ class Project
 		case volume_type
 		when :auto
 			# Put large files into separate streams, coalesce small files into single volume
+			Log.info 'sorting file list'
 			sorted = files.sort { |a, b| a.compressed_size <=> b.compressed_size } # Small files come first
 			cat_files_size = 0
+			Log.info 'determining files destination'
 			while !(file = sorted.shift).nil? && cat_files_size < cat_files_thrs && file.compressed_size < large_file_thrs
 				cat_files_size += file.compressed_size
 				cat_files << file
@@ -142,19 +187,26 @@ class Project
 		copy_volume = volumes << Copy.new(self)
 		# Commence the filesystem modification
 		begin
+			Log.info 'copying files'
 			copy_files!(copy_files, copy_volume)
+			copy_volume.store!
+			Log.info 'coalescing files'
 			copy_files!(cat_files, cat_volume)
+			cat_volume.store!
 			mf.store!
 		rescue
-			mf.rollback! rescue nil
-			cat_volume.rollback! rescue nil
-			copy_volume.rollback! rescue nil
+			Log.error 'backup failure, rolling back'
+			mf.rollback! rescue Log.error 'manifest rollback failure'
+			cat_volume.rollback! rescue Log.error 'cat volume rollback failure'
+			copy_volume.rollback! rescue Log.error 'copy volume rollback failure'
 			raise
 		end
+		Log.info 'backup finished'
 	end
 
 	private def copy_files!(files, volume)
 		files.each do |file|
+			Log.debug "copying file `#{file}`"
 			rs = open(file.file_path, 'rb')
 			file.stream = volume.stream(file)
 			ws = file.stream.writer
@@ -189,6 +241,7 @@ class Source < String
 	# Create new Source instance.
 	# Set the source identifier to +id+ if it's not +nil+ otherwise generate new stable identifier reflecting the #root_dir.
 	def initialize(project, root_dir, id = nil)
+		Log.debug "creating source `#{id}` for root `#{root_dir}`"
 		super(id.nil? ? Zlib.crc32(root_dir).to_s(36) : id)
 		@project = project
 		@root_dir = root_dir
@@ -217,18 +270,24 @@ class Source < String
 		files.each_value { |f| f.live = false }
 		# Scan though the source directory for new/modified files
 		each_file do |f|
+			Log.info "processing existing file `#{f}`"
 			f.live = true
 			if files.include?(f)
+				Log.info "file #{f} is already registered"
 				if files[f].mtime < f.mtime
+					Log.info "registered file `#{f}` has outdated modification time"
 					files.force!(f) # Remembered file is outdated, replace it
 					@modified = true
 				else 
+					Log.info "file #{f} has not changed since last backup"
 					files[f].live = true # Remembered file is still intact, mark it as alive
 				end
 			else
+				Log.info "registering new file `#{f}`"
 				files << f
 				@modified = true
 			end
+			Log.debug f.stream.nil? ? "file #{f} has no attached stream" : "file #{f} has stream `#{f.stream}` attached"
 		end
 		# Actually delete files not marked as live after the filesystem scan
 		files.delete_if { |f| f.live? ? false : @modified = true }
@@ -236,7 +295,8 @@ class Source < String
 
 	# Restore Source state from specified JSON hash +state+.
 	def self.from_json(project, id, state)
-		source = Source.new(project, state['root'], id)
+		Log.info "reading source `#{id}` from JSON state"
+		source = project.sources << Source.new(project, state['root'], id)
 		state['files'].each do |file_s, state|
 			source.files.force!(File.from_json(source, file_s, state))
 		end
@@ -300,12 +360,14 @@ class Source < String
 
 		# Attaches Stream object backing the file.
 		def stream=(stream)
-			raise 'Stream is already attached' unless @stream.nil?
+			Log.debug "attaching stream `#{stream}` to file `#{self}`"
+			Log.fatal 'stream is already attached' unless @stream.nil?
 			@stream = stream
 		end
 
 		# Restore File state from specified JSON hash +state+.
 		def self.from_json(source, file_s, state)
+			Log.info "reading file `#{file_s}` from JSON state"
 			File.new(source, file_s).from_json(state)
 		end
 
@@ -314,7 +376,7 @@ class Source < String
 			@size = (sz = state['size']).nil? ? 0 : sz
 			unless sz.nil?
 				@sha1 = state['sha1']
-				stream = Volume::Stream.from_json(self, state['stream'])
+				self.stream = Volume::Stream.from_json(self, state['stream'])
 			end
 			self
 		end
@@ -389,7 +451,13 @@ class Volume < String
 	end
 
 	def rollback!
-		FileUtils.rm_rf(File.join(project.backup_dir, self)) if modified?
+		if modified?
+			path = File.join(project.backup_dir, self)
+			Log.info "volume `#{self}` is modified, deleting `#{path}`"
+			FileUtils.rm_rf(path)
+		else
+			Log.info "volume `#{self}` is not modified, skipping"
+		end
 	end
 
 	# Returns compressor for +file+ according to current policy.
@@ -404,6 +472,10 @@ class Volume < String
 		else
 			raise
 		end
+	end
+
+	def store!
+		Log.info modified? ? "committing the modifications to volume `#{self}`" : "skipping pristine volume `#{self}`"
 	end
 
 	# Returns a set of volumes currently residing in the +project+ backup directory.
@@ -431,7 +503,7 @@ class Volume < String
 
 	# Returns a Volume instance corresponding to given +id+.
 	def self.open(project, id)
-		raise 'Unrecognized volume type' if(v = Volume.type(File.join(project.backup_dir, id))).nil?
+		Log.fatal 'unrecognized volume type' if(v = Volume.type(File.join(project.backup_dir, id))).nil?
 		v.new(project, id)
 	end
 
@@ -498,7 +570,6 @@ class Copy < Volume
 
 	def modify!; @modified = true end
 
-	  
 	def stream(file) Stream.new(self, file) end
 
 	class Stream < Volume::Stream
@@ -520,20 +591,23 @@ class Copy < Volume
 
 		# Returns new IO object to write the source file to.
 		def writer
+			Log.debug "obtaining a new writer for stream `#{self}`"
 			volume.modify!
 			full_path = volume.project.obfuscate? ? File.join(volume.project.backup_dir, volume, self) : File.join(volume.project.backup_dir, volume, file.source, self)
-			raise 'Refuse to overwrite existing stream file' if File.exist?(full_path)
+			Log.fatal "refuse to overwrite existing stream file `#{full_path}`" if File.exist?(full_path)
 			FileUtils.mkdir_p(File.dirname(full_path))
 			@writer = SHA1Computer.new(open(full_path, 'wb'))
 			compressed? ? GzipWriter.new(@writer) : @writer
 		end
 
 		def from_json(state)
+			Log.debug "reading JSON state for Copy stream `#{self}`"
 			@sha1 = state['sha1']
 			self
 		end
 
 		def to_json(*opts)
+			Log.debug "generating JSON state for Copy stream `#{self}`"
 			{
 				name: self.to_s,
 				volume: volume,
@@ -574,8 +648,11 @@ class Cat < Volume
 
 	def writer
 		if @writer.nil?
+			Log.debug "obtaining a new shared writer for volume `#{self}`"
 			@modified = true
-			@writer = open(File.join(project.backup_dir, self), 'wb')
+			path = File.join(project.backup_dir, self)
+			Log.fatal "refuse to overwrite existing file `#{path}`" if File.exist?(path)
+			@writer = open(path, 'wb')
 			class << @writer
 				def close; end # Have to disable stream closing for shared Cat writer IO since Project#backup! tries to close it after every file copy operation
 			end
@@ -591,11 +668,13 @@ class Cat < Volume
 
 		# Returns IO object to write the source file to.
 		def writer
+			Log.debug "obtaining a new writer for stream `#{self}`"
 			@writer = Writer.new(volume.writer)
 			compressed? ? Zlib::GzipWriter.new(@writer) : @writer
 		end
 
 		def from_json(state)
+			Log.debug "reading JSON state for Cat stream `#{self}`"
 			@size = state['size']
 			@offset = state['offset']
 			@sha1 = state['sha1']
@@ -603,6 +682,7 @@ class Cat < Volume
 		end
 
 		def to_json(*opts)
+			Log.debug "generating JSON state for Cat stream `#{self}`"
 			{
 				volume: volume,
 				offset: @offset = @writer.offset,
@@ -666,6 +746,7 @@ class Manifest < String
 		@new = id.nil?
 		@project = project
 		if new?
+			Log.info "creating new manifest `#{@session}`"
 			@session = self.to_s
 		else
 			read!(File.join(project.backup_dir, "#{id}.json.gz"))
@@ -675,11 +756,12 @@ class Manifest < String
 	# Loads manifest from file.
 	# Note that this does not automatically updates the project data structures. Refer to #upload! for details.
 	private def read!(file_name)
+		Log.info "loading manifest from `#{file_name}`"
 		open(file_name, 'rb') do |io|
 			Zlib::GzipReader.wrap(io) do |gz|
 				@json = JSON.parse(gz.read)
-				raise 'Unsupported manifest version' unless @json['version'] == Version
-				raise 'Missing session ID' if (@session = @json['session']).nil?
+				Log.fatal 'unsupported manifest version' unless @json['version'] == Version
+				Log.fatal 'missing session ID' if (@session = @json['session']).nil?
 			end
 		end
 	end
@@ -687,30 +769,40 @@ class Manifest < String
 	# Saves newly created and modified manifest to file.
 	def store!
 		if modified?
+			Log.info "committing modifications to manifest `#{self}`"
 			@file_name = File.join(project.backup_dir, "#{self}.json.gz")
-			raise 'Refuse to overwrite existing manifest' unless new? || !File.exist?(@file_name)
+			Log.fatal "refuse to overwrite existing manifest file `#{@file_name}`" unless new? || !File.exist?(@file_name)
 			open(@file_name, 'wb') do |io|
 				Zlib::GzipWriter.wrap(io) do |gz|
 					gz.write(JSON.pretty_generate(self))
 				end
 			end
+		else
+			Log.info "skipping pristine manifest `#{self}`"
 		end
 	end
 
 	# Reverts the filesystem in case of a failure by deleting newly created manifest.
 	def rollback!
-		FileUtils.rm_rf(@file_name) if modified?
+		if modified?
+			Log.info "manifest `#{self}` is modified, deleting `#{@file_name}`"
+			FileUtils.rm_rf(@file_name)
+		else
+			Log.info "manifest `#{self}` is not modified, skipping"
+		end
 	end
 
 	# Uploads the state loaded from file into the project's data structures replacing all existing data.
 	# Note that uploading does not raise the modification flags for the structures it alters.
 	def upload!
+		Log.info 'uploading manifest contents into project'
 		@json['sources'].each do |source_s, state|
 			source = project.sources.force!(Source.from_json(project, source_s, state))
 		end
 	end
 
 	def to_json(*opts)
+		Log.debug "generating JSON state for manifest `#{self}`"
 		{
 			version: Version,
 			mtime: Time.now,

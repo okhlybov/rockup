@@ -41,6 +41,18 @@ OptionParser.new do |parser|
 		opts[:compression] = :disable
 	end
 
+	parser.on('-q', 'Suppress all logging') do
+		Rockup::Log.level = Logger::UNKNOWN
+	end
+
+	parser.on('-v', '--verbose', 'Enable logging') do
+		Rockup::Log.level = Logger::INFO
+	end
+
+	parser.on('--debug', 'Enable extensive logging') do
+		Rockup::Log.level = Logger::DEBUG
+	end
+
 end.parse!
 
 backupdir =  ARGV.shift
