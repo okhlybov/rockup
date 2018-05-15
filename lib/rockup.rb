@@ -261,9 +261,9 @@ class Source < String
 			relative = path.nil? ? entry : ::File.join(path, entry)
 			full = ::File.join(root_dir, relative)
 			if ::File.directory?(full)
-			  ::File.readable?(full) ? each_file(relative, &block) : Log.warn("insufficient permissions to scan directory `#{full}`; skipping")
+				::File.readable?(full) ? each_file(relative, &block) : Log.warn("insufficient permissions to scan directory `#{full}`; skipping")
 			else
-			  ::File.readable?(full) ? yield(File.new(self, relative)) : Log.warn("insufficient permissions to read file `#{full}`; skipping")
+				::File.readable?(full) ? yield(File.new(self, relative)) : Log.warn("insufficient permissions to read file `#{full}`; skipping")
 			end
 		end
 		nil
@@ -532,17 +532,22 @@ class Volume < String
 			super(id)
 			@file = file
 			@volume = volume
-			@compressor = volume.compressor(file)
 		end
 
 		# Restore Stream state from specified JSON hash +state+.
 		def self.from_json(file, state)
 			project = file.source.project
 			stream = (project.volumes << Volume.open(project, state['volume'])).stream(file)
-			stream.from_json(state)
+			stream.from_json!(state)
 		end
 
-		# Represents an IO-like class which computes the SHA1 checksum of processed data.
+    def from_json!(state)
+		@state = state # Capturing hash for later #to_json
+		@compressor = state['compressor'].nil? ? nil : state['compressor'].intern
+		self
+    end
+
+    # Represents an IO-like class which computes the SHA1 checksum of processed data.
 		class SHA1Computer
 			attr_reader :sha1
 			def initialize(io)
@@ -579,17 +584,16 @@ class Copy < Volume
 
 		def initialize(volume, file, id = nil)
 			if id.nil?
+			  @compressor = volume.compressor(file)
 				id = if volume.project.obfuscate?
 					# TODO ensure that generated name is actually unique
 					x = SecureRandom.random_number(2**32).to_s(36)
 					File.join(x.slice!(0, 2), x)
 				else
-					# Can't use #compressed? here because it is set in the base class' constructor which is yet to be called
-					ext = Project::CompressorExt[volume.compressor(file)]
+					ext = Project::CompressorExt[compressor]
 					File.join(file.source, ext.nil? ? file : "#{file}#{ext}")
 				end
 			end
-			# @path is a file path relative to volume
 			super(volume, file, id)
 		end
 
@@ -597,24 +601,26 @@ class Copy < Volume
 		def writer
 			Log.debug "obtaining a new writer for stream `#{self}`"
 			volume.modify!
-      full_path = File.join(volume.project.backup_dir, volume, self)
+			full_path = File.join(volume.project.backup_dir, volume, self)
 			Log.fatal "refuse to overwrite existing stream file `#{full_path}`" if File.exist?(full_path)
 			FileUtils.mkdir_p(File.dirname(full_path))
 			@writer = SHA1Computer.new(open(full_path, 'wb'))
 			compressed? ? GzipWriter.new(@writer) : @writer
 		end
 
-		def from_json(state)
+		def from_json!(state)
 			Log.debug "reading JSON state for Copy stream `#{self}`"
-			@state = state
-			self
+			super
 		end
-
+    
 		def to_json(*opts)
 			Log.debug "generating JSON state for Copy stream `#{self}`"
-      @state ||= {'name' => to_s, 'volume' => volume, 'sha1' => @writer.sha1}
-      %w(volume name sha1).each { |k| Log.fatal("missing required key `#{k}`") if @state[k].nil? } if $DEBUG
-      @state.to_json(*opts)
+			if @state.nil?
+				@state = {'name' => to_s, 'volume' => volume, 'sha1' => @writer.sha1}
+				@state['compressor'] = compressor if compressed?
+			end
+			%w(volume name sha1).each { |k| Log.fatal("missing required key `#{k}`") if @state[k].nil? } if $DEBUG
+			@state.to_json(*opts)
 		end
 
 		# :nodoc:
@@ -666,6 +672,7 @@ class Cat < Volume
 
 		def initialize(volume, file, id = nil)
 			super(volume, file, id.nil? ? volume.new_index.to_s : id)
+			@compressor = volume.compressor(file) if id.nil?
 		end
 
 		# Returns IO object to write the source file to.
@@ -675,25 +682,27 @@ class Cat < Volume
 			compressed? ? Zlib::GzipWriter.new(@writer) : @writer
 		end
 
-    def from_json(state)
-      Log.debug "reading JSON state for Cat stream `#{self}`"
-      @state = state # Capturing hash for later #to_json
-      self
-    end
-
+		def from_json!(state)
+			Log.debug "reading JSON state for Cat stream `#{self}`"
+			super
+		end
+    
 		def to_json(*opts)
-      Log.debug "generating JSON state for Cat stream `#{self}`"
-      @state ||= {'volume' => volume, 'offset' => @writer.offset, 'size' => @writer.size, 'sha1' => @writer.sha1}
-      %w(volume offset size sha1).each { |k| Log.fatal("missing required key `#{k}`") if @state[k].nil? } if $DEBUG
-      @state.to_json(*opts)
+			Log.debug "generating JSON state for Cat stream `#{self}`"
+			if @state.nil?
+				@state = {'volume' => volume, 'offset' => @writer.offset, 'size' => @writer.size, 'sha1' => @writer.sha1}
+				@state['compressor'] = compressor if compressed?
+			end
+			%w(volume offset size sha1).each { |k| Log.fatal("missing required key `#{k}`") if @state[k].nil? } if $DEBUG
+			@state.to_json(*opts)
 		end
 
 		# :nodoc:
 		class Writer < SHA1Computer
 			attr_reader :size, :offset
 			def write(data)
-        @offset = @io.pos
-        @size = data.size
+				@offset = @io.pos
+				@size = data.size
 				super
 			end
 		end # Writer
