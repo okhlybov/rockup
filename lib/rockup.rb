@@ -109,7 +109,7 @@ class Project
 		@manifests = Identity.new
 		self.volume_type = :auto
 		self.compression = :auto
-		@obfuscate = true
+		#@obfuscate = true
 	end
 
 	# Compute file statistics
@@ -131,6 +131,8 @@ class Project
 		)
 	end
 
+	# Performs backup operation of specified source directories.
+	# Returns manifest object.
 	def backup!(srcs, full = false)
 		Log.info 'starting backup'
 		Log.fatal "backup directory `#{backup_dir}` does not exist" unless File.directory?(backup_dir)
@@ -202,7 +204,9 @@ class Project
 			copy_volume.rollback! rescue Log.error 'copy volume rollback failure'
 			raise
 		end
+		Log.info 'no changes detected' unless cat_volume.modified? || copy_volume.modified? || mf.modified?
 		Log.info 'backup finished'
+		mf
 	end
 
 	private def copy_files!(files, volume)
@@ -247,6 +251,7 @@ class Source < String
 		@project = project
 		@root_dir = root_dir
 		@files = Identity.new
+		@modified = false
 	end
 
 	# Calls the specified block for each file recursively found in the #root_dir.
@@ -256,9 +261,9 @@ class Source < String
 			relative = path.nil? ? entry : ::File.join(path, entry)
 			full = ::File.join(root_dir, relative)
 			if ::File.directory?(full)
-				each_file(relative, &block)
+			  ::File.readable?(full) ? each_file(relative, &block) : Log.warn("insufficient permissions to scan directory `#{full}`; skipping")
 			else
-				yield File.new(self, relative)
+			  ::File.readable?(full) ? yield(File.new(self, relative)) : Log.warn("insufficient permissions to read file `#{full}`; skipping")
 			end
 		end
 		nil
@@ -385,7 +390,7 @@ class Source < String
 		def to_json(*opts)
 			hash = {mtime: mtime}
 			# The fields below are meaningful for non-zero files only
-			hash.merge(size: size, sha1: sha1, stream: stream) if size > 0
+			hash.merge!(size: size, sha1: sha1, stream: stream) if size > 0
 			hash
 		end
 
@@ -445,6 +450,7 @@ class Volume < String
 		super(id)
 		@new = new
 		@project = project
+		@modified = false
 	end
 
 	def rollback!
@@ -580,9 +586,10 @@ class Copy < Volume
 				else
 					# Can't use #compressed? here because it is set in the base class' constructor which is yet to be called
 					ext = Project::CompressorExt[volume.compressor(file)]
-					ext.nil? ? file : "#{file}#{ext}"
+					File.join(file.source, ext.nil? ? file : "#{file}#{ext}")
 				end
 			end
+			# @path is a file path relative to volume
 			super(volume, file, id)
 		end
 
@@ -590,7 +597,7 @@ class Copy < Volume
 		def writer
 			Log.debug "obtaining a new writer for stream `#{self}`"
 			volume.modify!
-			full_path = volume.project.obfuscate? ? File.join(volume.project.backup_dir, volume, self) : File.join(volume.project.backup_dir, volume, file.source, self)
+      full_path = File.join(volume.project.backup_dir, volume, self)
 			Log.fatal "refuse to overwrite existing stream file `#{full_path}`" if File.exist?(full_path)
 			FileUtils.mkdir_p(File.dirname(full_path))
 			@writer = SHA1Computer.new(open(full_path, 'wb'))
