@@ -25,7 +25,7 @@ module Log
 	def self.info(*args, &block) @@logger.info(*args, &block) end
 	def self.warn(*args, &block) @@logger.warn(*args, &block) end
 	def self.error(*args, &block) @@logger.error(*args, &block) end
-	def self.fatal(*args, &block) @@logger.fatal(*args, &block); raise *args end
+	def self.fatal(*args, &block) @@logger.fatal(*args, &block); raise(*args) end
 end # Log
 
 
@@ -109,7 +109,7 @@ class Project
 		@manifests = Identity.new
 		self.volume_type = :auto
 		self.compression = :auto
-		#@obfuscate = true
+		@obfuscate = true
 	end
 
 	# Compute file statistics
@@ -194,6 +194,7 @@ class Project
 			copy_files!(cat_files, cat_volume)
 			cat_volume.store!
 			mf.store!
+			Log.fatal 'pristine manifest & modified volume(s)' if $DEBUG && (cat_volume.modified? || copy_volume.modified?) && !mf.modified?
 		rescue
 			Log.error 'backup failure, rolling back'
 			mf.rollback! rescue Log.error 'manifest rollback failure'
@@ -287,7 +288,7 @@ class Source < String
 				files << f
 				@modified = true
 			end
-			Log.debug f.stream.nil? ? "file #{f} has no attached stream" : "file #{f} has stream `#{f.stream}` attached"
+			Log.debug(f.stream.nil? ? "file #{f} has no attached stream" : "file #{f} has stream `#{f.stream}` attached")
 		end
 		# Actually delete files not marked as live after the filesystem scan
 		files.delete_if { |f| f.live? ? false : @modified = true }
@@ -297,8 +298,8 @@ class Source < String
 	def self.from_json(project, id, state)
 		Log.info "reading source `#{id}` from JSON state"
 		source = project.sources << Source.new(project, state['root'], id)
-		state['files'].each do |file_s, state|
-			source.files.force!(File.from_json(source, file_s, state))
+		state['files'].each do |file_s, s|
+			source.files.force!(File.from_json(source, file_s, s))
 		end
 		source
 	end
@@ -384,11 +385,7 @@ class Source < String
 		def to_json(*opts)
 			hash = {mtime: mtime}
 			# The fields below are meaningful for non-zero files only
-			if size > 0
-				hash[:size] = size
-				hash[:sha1] = sha1
-				hash[:stream] = stream unless stream.nil?
-			end
+			hash.merge(size: size, sha1: sha1, stream: stream) if size > 0
 			hash
 		end
 
@@ -602,17 +599,15 @@ class Copy < Volume
 
 		def from_json(state)
 			Log.debug "reading JSON state for Copy stream `#{self}`"
-			@sha1 = state['sha1']
+			@state = state
 			self
 		end
 
 		def to_json(*opts)
 			Log.debug "generating JSON state for Copy stream `#{self}`"
-			{
-				name: self.to_s,
-				volume: volume,
-				sha1: @writer.sha1
-			}.to_json(*opts)
+      @state ||= {'name' => to_s, 'volume' => volume, 'sha1' => @writer.sha1}
+      %w(volume name sha1).each { |k| Log.fatal("missing required key `#{k}`") if @state[k].nil? } if $DEBUG
+      @state.to_json(*opts)
 		end
 
 		# :nodoc:
@@ -673,34 +668,25 @@ class Cat < Volume
 			compressed? ? Zlib::GzipWriter.new(@writer) : @writer
 		end
 
-		def from_json(state)
-			Log.debug "reading JSON state for Cat stream `#{self}`"
-			@size = state['size']
-			@offset = state['offset']
-			@sha1 = state['sha1']
-			self
-		end
+    def from_json(state)
+      Log.debug "reading JSON state for Cat stream `#{self}`"
+      @state = state # Capturing hash for later #to_json
+      self
+    end
 
 		def to_json(*opts)
-			Log.debug "generating JSON state for Cat stream `#{self}`"
-			{
-				volume: volume,
-				offset: @offset = @writer.offset,
-				size: @size = @writer.size,
-				sha1: @sha1 = @writer.sha1
-			}.to_json(*opts)
+      Log.debug "generating JSON state for Cat stream `#{self}`"
+      @state ||= {'volume' => volume, 'offset' => @writer.offset, 'size' => @writer.size, 'sha1' => @writer.sha1}
+      %w(volume offset size sha1).each { |k| Log.fatal("missing required key `#{k}`") if @state[k].nil? } if $DEBUG
+      @state.to_json(*opts)
 		end
 
 		# :nodoc:
 		class Writer < SHA1Computer
 			attr_reader :size, :offset
-			def initialize(io)
-				super
-				@size = 0
-				@offset = @io.pos
-			end
 			def write(data)
-				@size += data.size
+        @offset = @io.pos
+        @size = data.size
 				super
 			end
 		end # Writer
@@ -797,7 +783,7 @@ class Manifest < String
 	def upload!
 		Log.info 'uploading manifest contents into project'
 		@json['sources'].each do |source_s, state|
-			source = project.sources.force!(Source.from_json(project, source_s, state))
+			project.sources.force!(Source.from_json(project, source_s, state))
 		end
 	end
 
