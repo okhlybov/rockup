@@ -9,6 +9,8 @@ opts = {
 	compression: :auto
 }
 
+Rockup::Log.level = Logger::DEBUG if $DEBUG
+
 OptionParser.new do |parser|
 
 	parser.banner = 'Usage: rockup [opts] backup-dir {source-dir-1 source-dir-2 ...}'
