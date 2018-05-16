@@ -279,14 +279,21 @@ class Source < String
 			Log.info "processing existing file `#{f}`"
 			f.live = true
 			if files.include?(f)
+				_f = files[f]
 				Log.info "file #{f} is already registered"
-				if files[f].mtime < f.mtime
+				if _f.mtime < f.mtime
 					Log.info "registered file `#{f}` has outdated modification time"
 					files.force!(f) # Remembered file is outdated, replace it
 					@modified = true
-				else 
-					Log.info "file #{f} has not changed since last backup"
-					files[f].live = true # Remembered file is still intact, mark it as alive
+				else
+					unless _f.meta_equal?(f)
+						Log.info "meta information for file `#{f}` has changed"
+						_f.meta_borrow!(f)
+						@modified = true
+					else
+						Log.info "file #{f} has not changed since last backup"
+					end
+					_f.live = true # Remembered file is still intact, mark it as alive
 				end
 			else
 				Log.info "registering new file `#{f}`"
@@ -330,7 +337,28 @@ class Source < String
 		def mtime; @mtime ||= info.mtime.round end
 
 		# Returns file size.
-		def size; info.size end
+		def size; @size ||= info.size end
+
+		# Returns POSIX permissions mode.
+		def mode; @mode ||= info.mode end
+
+		# Returns POSIX user id.
+		def uid; @uid ||= info.uid end
+
+		# Return POSIX group id.
+		def gid; @gid ||= info.gid end
+
+		# Borrow metadata (permissions, owner etc.) from source +file+.
+		def meta_borrow!(file)
+			@mode = file.mode
+			@uid = file.uid
+			@gid = file.gid
+		end
+
+		# Returns true if metadata for +self+ and +file+ are equal.
+		def meta_equal?(file)
+			mode == file.mode && uid == file.uid && gid == file.gid
+		end
 
 		# Returns the SHA1 checksum of the file.
 		def sha1; @sha1 ||= Digest::SHA1.file(file_path).to_s end
@@ -378,6 +406,9 @@ class Source < String
 		end
 
 		def from_json(state)
+			@uid = state['uid']
+			@gid = state['gid']
+			@mode = state['mode']
 			@mtime = Time.parse(state['mtime'])
 			@size = (sz = state['size']).nil? ? 0 : sz
 			unless sz.nil?
@@ -388,7 +419,7 @@ class Source < String
 		end
 
 		def to_json(*opts)
-			hash = {mtime: mtime}
+			hash = {mtime: mtime, mode: mode, uid: uid, gid: gid}
 			# The fields below are meaningful for non-zero files only
 			hash.merge!(size: size, sha1: sha1, stream: stream) if size > 0
 			hash
