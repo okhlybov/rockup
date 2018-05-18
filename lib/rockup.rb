@@ -224,6 +224,37 @@ class Project
 		end
 	end
 
+	# Preforms restoring backed files into empty the directory +dst+.
+	def restore!(dst)
+		Log.info 'starting restoration'
+		if File.directory?(dst)
+			Log.info "destination directory `#{dst}` already exists; reusing"
+		else
+			FileUtils.mkdir_p(dst) rescue Log.fatal "failed to create destination directory `#{dst}`"
+		end
+		#Log.fatal "refuse to restore to a non-empty directory `#{dst}`" unless Dir.empty?(dst)
+		Log.info 'processing manifest'
+		mf = manifests << Manifest.new(self, Manifest.manifests(self).sort.last)
+		mf.upload!
+		sources.each_key do |source|
+			Log.info "processing source directory `#{source.root_dir}`"
+			dir = File.join(dst, source)
+			Log.info "creating destination directory #{dir}"
+			FileUtils.mkdir_p(dir)
+			source.files.each_key do |file|
+				Log.info "restoring file `#{file}`"
+				file_path = File.join(dir, file)
+				if file.size > 0
+					Log.fatal "file #{file} has no stream attached" if $DEBUG && file.stream.nil?
+				else
+					Log.debug "touching zero-size file `#{file}`"
+					FileUtils.touch(file_path)
+				end
+			end
+		end
+		Log.info 'restoration finished'
+	end
+
 end # Project
 
 
@@ -382,6 +413,7 @@ class Source < String
 		def initialize(source, name)
 			super(name)
 			@source = source
+			@stream = nil
 		end
 
 		private def info; @info ||= ::File::Stat.new(file_path) end
@@ -563,6 +595,7 @@ class Volume < String
 			super(id)
 			@file = file
 			@volume = volume
+			@state = nil
 		end
 
 		# Restore Stream state from specified JSON hash +state+.
@@ -639,6 +672,15 @@ class Copy < Volume
 			compressed? ? GzipWriter.new(@writer) : @writer
 		end
 
+		# Returns new IO object to read the source file.
+		def reader
+			Log.debug "obtaining a new reader for stream `#{self}`"
+			full_path = File.join(volume.project.backup_dir, volume, self)
+			Log.fatal "failed to open stream file `#{full_path}`" if !File.readable?(full_path)
+			reader = open(full_path, 'rb')
+			compressed? ? GzipWriter.new(reader) : reader
+		end
+
 		def from_json!(state)
 			Log.debug "reading JSON state for Copy stream `#{self}`"
 			super
@@ -699,6 +741,19 @@ class Cat < Volume
 		@writer
 	end
 
+	def reader
+		if @reader.nil?
+			Log.debug "obtaining a new shared reader for volume `#{self}`"
+			path = File.join(project.backup_dir, self)
+			Log.fatal "refuse to overwrite existing file `#{path}`" if File.exist?(path)
+			@reader = open(path, 'rb')
+			class << @reader
+				def close; end # Have to disable stream closing for shared Cat reader IO since Project#backup! tries to close it after every file copy operation
+			end
+		end
+		@reader
+	end
+
 	class Stream < Volume::Stream
 
 		def initialize(volume, file, id = nil)
@@ -711,6 +766,12 @@ class Cat < Volume
 			Log.debug "obtaining a new writer for stream `#{self}`"
 			@writer = Writer.new(volume.writer)
 			compressed? ? Zlib::GzipWriter.new(@writer) : @writer
+		end
+
+		# Returns IO object to read the source file from.
+		def reader
+			Log.debug "obtaining a new reader for stream `#{self}`"
+			compressed? ? Zlib::GzipReader.new(volume.reader) : volume.reader
 		end
 
 		def from_json!(state)
@@ -731,10 +792,14 @@ class Cat < Volume
 		# :nodoc:
 		class Writer < SHA1Computer
 			attr_reader :size, :offset
-			def write(data)
-				@offset = @io.pos
-				@size = data.size
+			def initialize(*args)
 				super
+				@offset = @io.pos
+				@size = 0
+			end
+			def write(data)
+				super
+				@size += data.size
 			end
 		end # Writer
 
