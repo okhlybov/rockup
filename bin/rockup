@@ -4,44 +4,56 @@ require 'rockup'
 require 'optparse'
 
 opts = {
-	mode: :backup,
-	compress: :auto
+  mode: :backup,
+  full: false,
+  compression: :auto
 }
+
+Rockup::Log.level = Logger::DEBUG if $DEBUG
 
 OptionParser.new do |parser|
 
-	parser.banner = 'Usage: rockup [opts] backup-dir {source-dir-1 source-dir-2 ...}'
+  parser.banner = 'Usage: rockup [opts] backup-dir {source-dir-1 source-dir-2 ...}'
 
-	parser.on('-h', '--help', 'Print help') do
-		puts parser
-		exit
-	end
+  parser.on('-h', '--help', 'Print help') do
+    puts parser
+    exit
+  end
 
-	parser.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do
-		opts[:mode] = :backup
-	end
+  parser.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do end
 
-	parser.on('-B', 'Force full backup') do
-		opts[:mode] = :backup
-		opts[:full] = true
-	end
+  parser.on('-B', 'Force full backup') do
+    opts[:full] = true
+  end
 
-	parser.on('-r DESTDIR', 'Restore files from backup to DESTDIR') do |dir|
-		opts[:mode] = :restore
-		opts[:restore] = dir
-	end
+  parser.on('-r DESTDIR', 'Restore files from backup to DESTDIR') do |dir|
+    opts[:mode] = :restore
+    opts[:restore] = dir
+  end
 
-	parser.on('--dry-run', 'Do not modify the filesystem in any way (no files/directories are created or modified)') do
-		opts[:dry] = true
-	end
+  parser.on('--dry-run', 'Do not modify the filesystem in any way (no files/directories are created or modified)') do
+    opts[:dry] = true
+  end
 
-	parser.on('--compress', 'Enforce compression of backed data') do
-		opts[:compress] = :force
-	end
+  parser.on('--compress', 'Enforce compression of backed data') do
+    opts[:compression] = :enforce
+  end
 
-	parser.on('--no-compress', 'Disable compression of backed data') do
-		opts[:compress] = :disable
-	end
+  parser.on('--no-compress', 'Disable compression of backed data') do
+    opts[:compression] = :disable
+  end
+
+  parser.on('-q', 'Suppress all logging') do
+    Rockup::Log.level = Logger::UNKNOWN
+  end
+
+  parser.on('-v', '--verbose', 'Enable logging') do
+    Rockup::Log.level = Logger::INFO
+  end
+
+  parser.on('--debug', 'Enable extensive logging') do
+    Rockup::Log.level = Logger::DEBUG
+  end
 
 end.parse!
 
@@ -50,15 +62,15 @@ srcdirs = ARGV
 
 raise 'Backup directory must be specified' if backupdir.nil?
 
-project = Rockup::Project.new(srcdirs, backupdir)
+project = Rockup::Project.new(backupdir)
 
-project.dry = opts[:dry]
-project.compress = opts[:compress]
+#project.dry = opts[:dry]
+project.compression = opts[:compression]
 
 case opts[:mode]
 when :backup
-	raise 'At least one source directory must be specified' if srcdirs.empty?
-	project.backup!(!opts[:full])
+  raise 'At least one source directory must be specified' if srcdirs.empty?
+  project.backup!(srcdirs, opts[:full])
 when :restore
-	project.restore!(opts[:restore])
+  project.restore!(opts[:restore])
 end
