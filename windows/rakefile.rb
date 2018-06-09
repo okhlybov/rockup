@@ -34,4 +34,8 @@ task :trim_rt => :extract_rt do
   end
 end
 
+task :build_launcher => Dist do
+  sh "gcc -s -O2 -DNDEBUG -o #{Dist}/rockup.exe rockup.c"
+end
+
 task :default => :extract_rt
