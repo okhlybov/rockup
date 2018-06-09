@@ -9,14 +9,16 @@ module RT
 end
 
 Dist = 'dist'
+Bin = File.join(Dist, 'bin')
 
 file RT::Archive do
     sh "wget #{RT::URL}"
 end
 
 directory Dist
+directory Bin
 
-task :clobber do |t|
+task :clobber do
   rm_rf Dist
 end
 
@@ -34,8 +36,19 @@ task :trim_rt => :extract_rt do
   end
 end
 
-task :build_launcher => Dist do
-  sh "gcc -s -O2 -DNDEBUG -o #{Dist}/rockup.exe rockup.c"
+task :install_gem do
+  chdir "#{Dist}/ruby/bin" do
+    sh "cmd /c gem.cmd install ../../../*gem"
+  end
 end
 
-task :default => :extract_rt
+task :build_launcher => Bin do
+  sh "gcc -s -O2 -DNDEBUG -o #{Bin}/rockup.exe rockup.c"
+end
+
+task :build => [:install_gem, :build_launcher, :trim_rt] do
+  pf = ENV['ProgramFiles(x86)']
+  sh %{"#{pf}/Inno Setup 5/iscc.exe" rockup.iss}
+end
+
+task :default => :build
