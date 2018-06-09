@@ -232,7 +232,7 @@ class Project
     else
       FileUtils.mkdir_p(dst) rescue Log.fatal "failed to create destination directory `#{dst}`"
     end
-    #Log.fatal "refuse to restore to a non-empty directory `#{dst}`" unless Dir.empty?(dst)
+    Log.fatal "refuse to restore to a non-empty directory `#{dst}`" unless Dir.empty?(dst)
     Log.info 'processing manifest'
     mf = manifests << Manifest.new(self, Manifest.manifests(self).sort.last)
     mf.upload!
@@ -244,8 +244,32 @@ class Project
       source.files.each_key do |file|
         Log.info "restoring file `#{file}`"
         file_path = File.join(dir, file)
+        FileUtils.mkdir_p(File.dirname(file_path))
         if file.size > 0
           Log.fatal "file #{file} has no stream attached" if $DEBUG && file.stream.nil?
+          rs = file.stream.reader
+          ws = open(file_path, 'wb')
+          begin
+            copied = false
+            begin
+              FileUtils.copy_stream(rs, ws)
+              copied = true
+            ensure
+              rs.close
+              ws.close
+            end
+            if copied && Digest::SHA1.file(file_path).to_s == file.sha1
+              Log.info("checksum verification passed for file `#{file_path}`")
+            else
+              Log.fatal("checksum verification failed for file `#{file_path}`")
+            end
+          rescue
+            unless $DEBUG
+              Log.error("removing corrupted file `#{file_path}`")
+              FileUtils.rm_rf(file_path)
+            end
+            raise
+          end
         else
           Log.debug "touching zero-size file `#{file}`"
           FileUtils.touch(file_path)
@@ -618,6 +642,10 @@ class Volume < String
         @sha1 = Digest::SHA1.new
         @io = io
       end
+      def read(*args)
+        @sha1.update(data = @io.read(*args))
+        data
+      end
       def write(data)
         @sha1.update(data)
         @io.write(data)
@@ -672,13 +700,13 @@ class Copy < Volume
       compressed? ? GzipWriter.new(@writer) : @writer
     end
 
-    # Returns new IO object to read the source file.
+    # Returns new IO object to read the stream file.
     def reader
       Log.debug "obtaining a new reader for stream `#{self}`"
       full_path = File.join(volume.project.backup_dir, volume, self)
       Log.fatal "failed to open stream file `#{full_path}`" if !File.readable?(full_path)
       reader = open(full_path, 'rb')
-      compressed? ? GzipWriter.new(reader) : reader
+      compressed? ? Zlib::GzipReader.new(reader) : reader
     end
 
     def from_json!(state)
@@ -697,15 +725,28 @@ class Copy < Volume
     end
 
     # :nodoc:
-    # Auxillary Gzip Writer which closes the chained IO when closing self
-    class GzipWriter < Zlib::GzipWriter
+    # Auxillary Gzip reader which closes the chained IO when closing self
+    class GzipReader < Zlib::GzipReader
       def initialize(io, *opts)
+        @chained = io
         super
-        @chained_io = io
       end
       def close
         super
-        @chained_io.close
+        @chained.close
+      end
+    end # GzipReader
+
+    # :nodoc:
+    # Auxillary Gzip writer which closes the chained IO when closing self
+    class GzipWriter < Zlib::GzipWriter
+      def initialize(io, *opts)
+        @chained = io
+        super
+      end
+      def close
+        super
+        @chained.close
       end
     end # GzipWriter
 
@@ -745,7 +786,6 @@ class Cat < Volume
     if @reader.nil?
       Log.debug "obtaining a new shared reader for volume `#{self}`"
       path = File.join(project.backup_dir, self)
-      Log.fatal "refuse to overwrite existing file `#{path}`" if File.exist?(path)
       @reader = open(path, 'rb')
       class << @reader
         def close; end # Have to disable stream closing for shared Cat reader IO since Project#backup! tries to close it after every file copy operation
@@ -771,11 +811,14 @@ class Cat < Volume
     # Returns IO object to read the source file from.
     def reader
       Log.debug "obtaining a new reader for stream `#{self}`"
-      compressed? ? Zlib::GzipReader.new(volume.reader) : volume.reader
+      @reader = Reader.new(volume.reader, @offset, @size)
+      compressed? ? Zlib::GzipReader.new(@reader) : @reader
     end
 
     def from_json!(state)
       Log.debug "reading JSON state for Cat stream `#{self}`"
+      @offset = state['offset']
+      @size = state['size']
       super
     end
     
@@ -787,6 +830,24 @@ class Cat < Volume
       end
       %w(volume offset size sha1).each { |k| Log.fatal("missing required key `#{k}`") if @state[k].nil? } if $DEBUG
       @state.to_json(*opts)
+    end
+
+    # :nodoc:
+    class Reader
+      def initialize(io, offset, size)
+        @io = io
+        @io.seek(offset)
+        @size = size
+      end
+      def readpartial(*args)
+        @io.readpartial(*args)
+      end
+      def read
+        @io.read(@size)
+      end
+      def close
+        @io.close
+      end
     end
 
     # :nodoc:
