@@ -37,9 +37,7 @@ task :trim_rt => :extract_rt do
 end
 
 task :install_gem do
-  chdir "#{Dist}/ruby/bin" do
-    sh "cmd /c gem.cmd install ../../../*gem"
-  end
+  sh "#{Dist}/ruby/bin/gem.cmd install ../*gem"
 end
 
 task :build_launcher => Bin do
