@@ -18,7 +18,7 @@ int main(int _argc, char** _argv) {
 	char* root = malloc(SZ*sizeof(char));
 	GetModuleFileName(NULL, root, SZ);
 	i = strlen(root);
-	while(root[--i] != '\\'); root[i] = '\0';
+	while(root[--i] != '\\'); while(root[--i] != '\\'); root[i] = '\0';
 	char* ruby = malloc(SZ*sizeof(char));
 	snprintf(ruby, SZ, "%s\\ruby\\bin\\ruby.exe", root); // Path to Ruby interpreter
 	char* script = malloc(SZ*sizeof(char));
@@ -36,7 +36,5 @@ int main(int _argc, char** _argv) {
 			printf("> %s\n", argv[i++]);
 		}
 	#endif
-	_spawnvp(_P_OVERLAY, argv[0], argv);
-	if(i == -1) fprintf(stderr, "spawn() failed with error code %d\n", i = errno);
-	return i;
+	return _spawnvp(_P_WAIT, argv[0], argv);
 }          
