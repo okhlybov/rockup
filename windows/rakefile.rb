@@ -1,52 +1,49 @@
-# Expects the Cygwin/MSYS environment
-
-require 'digest'
-
-module RT
-  Version = '2.5.1-1'
-  Archive = "rubyinstaller-#{Version}-x86.7z"
-  URL = "https://github.com/oneclick/rubyinstaller2/releases/download/rubyinstaller-#{Version}/#{Archive}"
-end
-
 Dist = 'dist'
-Bin = File.join(Dist, 'bin')
+Bin = "#{Dist}/bin"
 
-file RT::Archive do
-    sh "wget #{RT::URL}"
+
+module Ruby
+  Version = '2.5.1-1'
+  Tarball = "rubyinstaller-#{Version}-x86.7z"
+  URL = "https://github.com/oneclick/rubyinstaller2/releases/download/rubyinstaller-#{Version}/#{Tarball}"
+  Dir = "#{Dist}/ruby"
 end
 
-directory Dist
-directory Bin
 
-task :clobber do
-  rm_rf Dist
+module Rockup
+  Gem = 'rockup-0.1.0.gem'
+  Script = "#{Ruby::Dir}/bin/rockup"
 end
 
-task :extract_rt => [Dist, RT::Archive] do
-  chdir Dist do
-    rm_rf 'ruby'
-    sh "7z x -y ../#{RT::Archive}"
-    sh 'mv rubyinstaller* ruby'
-  end
+
+module Launcher
+  Exe = "#{Bin}/rockup.exe"
+  Src = "#{Dir.pwd}/rockup.c"
 end
 
-task :trim_rt => :extract_rt do
-  chdir File.join(Dist, 'ruby') do
-    sh 'rm -rf include share/doc lib/{pkgconfig,*.a} lib/ruby/gems/*/{cache,doc}/*'
-  end
+
+[Bin, Dist].each {|x| directory x}
+
+file Launcher::Exe => [Launcher::Src, Bin] do |t|
+  sh "gcc -s -O2 -DNDEBUG -o #{t.name} #{t.prerequisites.first}"
 end
 
-task :install_gem do
-  sh "#{Dist}/ruby/bin/gem.cmd install ../*gem"
+
+file Ruby::Tarball do
+  sh "wget #{Ruby::URL}"
 end
 
-task :build_launcher => Bin do
-  sh "gcc -s -O2 -DNDEBUG -o #{Bin}/rockup.exe rockup.c"
+
+file Ruby::Dir => [Ruby::Tarball, Dist] do
+  sh "7z x -y #{Ruby::Tarball}"
+  rm_rf Ruby::Dir
+  mv Dir['rubyinstaller*'].first, Ruby::Dir
 end
 
-task :build => [:install_gem, :build_launcher, :trim_rt] do
-  pf = ENV['ProgramFiles(x86)']
-  sh %{"#{pf}/Inno Setup 5/iscc.exe" rockup.iss}
+
+file Rockup::Script => ["../#{Rockup::Gem}", Ruby::Dir] do |t|
+  sh "#{Ruby::Dir}/bin/gem.cmd install --local #{t.prerequisites.first}"
 end
 
-task :default => :build
+
+task :default => [Launcher::Exe, Ruby::Dir, Rockup::Script]
