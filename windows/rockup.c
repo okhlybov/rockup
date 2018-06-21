@@ -22,10 +22,12 @@ int main(int _argc, char** _argv) {
 	char* ruby = malloc(SZ*sizeof(char));
 	snprintf(ruby, SZ, "%s\\ruby\\bin\\ruby.exe", root); // Path to Ruby interpreter
 	char* script = malloc(SZ*sizeof(char));
-	snprintf(script, SZ, "%s\\ruby\\bin\\rockup", root); // Path to Ruby script
+	snprintf(script, SZ, "\"%s\\ruby\\bin\\rockup\"", root); // Path to Ruby script
+	char* argv0 = malloc(SZ*sizeof(char));
+	snprintf(argv0, SZ, "\"%s\"", ruby);
 	char** argv = calloc(SZ, sizeof(char*));
 	i = 0;
-	argv[i++] = ruby;
+	argv[i++] = argv0;
 	argv[i++] = script;
 	for(int x = 1; x < _argc; ++x) {
 		argv[i++] = _argv[x];
@@ -36,5 +38,5 @@ int main(int _argc, char** _argv) {
 			printf("> %s\n", argv[i++]);
 		}
 	#endif
-	return _spawnvp(_P_WAIT, argv[0], argv);
+	return _spawnvp(_P_WAIT, ruby, argv);
 }          
