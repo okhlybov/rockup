@@ -1,3 +1,6 @@
+raise '32-bit MIinGW environment is required' unless ENV['MSYSTEM_CARCH'] == 'i686'
+
+
 Dist = 'dist'
 Bin = "#{Dist}/bin"
 
@@ -7,6 +10,8 @@ module Ruby
   Tarball = "rubyinstaller-#{Version}-x86.7z"
   URL = "https://github.com/oneclick/rubyinstaller2/releases/download/rubyinstaller-#{Version}/#{Tarball}"
   Dir = "#{Dist}/ruby"
+  Gem = "#{Dir}/bin/gem.cmd"
+  Ruby = "#{Dir}/bin/ruby.exe"
 end
 
 
@@ -21,6 +26,18 @@ module Launcher
   Src = "#{Dir.pwd}/rockup.c"
 end
 
+
+module InnoSetup
+  def self.iscc_exe
+    reg32 = ENV['PROCESSOR_ARCHITECTURE'] == 'AMD64' ? '/reg:32' : nil
+    cmd = %(reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 5_is1" #{reg32})
+    raise 'Inno Setup is not found' if (/InstallLocation.*REG_SZ\s*(.*)$/ =~ `#{cmd}`).nil?
+    "#{$1.strip}\\iscc.exe"
+  end
+end
+
+
+CMD = ENV['COMSPEC']
 
 [Bin, Dist].each {|x| directory x}
 
@@ -42,7 +59,7 @@ end
 
 
 file Rockup::Script => ["../#{Rockup::Gem}", Ruby::Dir] do |t|
-  sh "#{Ruby::Dir}/bin/gem.cmd install --local #{t.prerequisites.first}"
+  sh "#{Ruby::Gem} install --local #{t.prerequisites.first}"
 end
 
 
