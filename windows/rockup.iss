@@ -1,15 +1,17 @@
 #define MyAppName "Rockup"
 #define MyPkgName "rockup"
 #define MyAppPublisher "Oleg A. Khlybov"
-#define MyVersion "0.1.0"
-#define MyBuild "1"
+//#define MyVersion "0.1.0"
+//#define MyBuild "1"
+//#define MyOutput "{#MyPkgName}-{#MyVersion}-{#MyBuild}"
+
 
 [Setup]
 AppName="{#MyAppName}"
 AppVersion="{#MyVersion}-{#MyBuild}"
 AppPublisher="{#MyAppPublisher}"
 DefaultDirName="{pf}\{#MyAppName}"
-OutputBaseFilename="{#MyPkgName}-{#MyVersion}-{#MyBuild}"
+OutputBaseFilename="{#MyOutput}"
 DisableProgramGroupPage=yes
 SolidCompression=yes
 ChangesEnvironment=True
