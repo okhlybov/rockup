@@ -6,6 +6,7 @@ require 'optparse'
 opts = {
   mode: :backup,
   full: false,
+  volume_type: :auto,
   compression: :auto
 }
 
@@ -43,6 +44,14 @@ OptionParser.new do |parser|
     opts[:compression] = :disable
   end
 
+  parser.on('--separate', 'Store each backup file into separate stream file; do not coalesce') do
+    opts[:volume_type] = :copy
+  end
+
+  parser.on('--coalesce', 'Coalesce all backup files into single stream file') do
+    opts[:volume_type] = :cat
+  end
+
   parser.on('-q', 'Suppress all logging') do
     Rockup::Log.level = Logger::UNKNOWN
   end
@@ -65,11 +74,12 @@ raise 'Backup directory must be specified' if backupdir.nil?
 project = Rockup::Project.new(backupdir)
 
 #project.dry = opts[:dry]
-project.compression = opts[:compression]
 
 case opts[:mode]
 when :backup
   raise 'At least one source directory must be specified' if srcdirs.empty?
+  project.compression = opts[:compression]
+  project.volume_type = opts[:volume_type]
   project.backup!(srcdirs, opts[:full])
 when :restore
   project.restore!(opts[:restore])
