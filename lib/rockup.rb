@@ -230,9 +230,13 @@ class Project
     if File.directory?(dst)
       Log.info "destination directory `#{dst}` already exists; reusing"
     else
-      FileUtils.mkdir_p(dst) rescue Log.fatal "failed to create destination directory `#{dst}`"
+      FileUtils.mkdir_p(dst) # rescue Log.fatal "failed to create destination directory `#{dst}`"
     end
-    Log.fatal "refuse to restore to a non-empty directory `#{dst}`" unless Dir.empty?(dst)
+    if $DEBUG
+      Log.warn "performing restoration into a non-empty directory `#{dst}`"
+    else
+      Log.fatal "refuse to restore into a non-empty directory `#{dst}`" unless Dir.empty?(dst)
+    end
     Log.info 'processing manifest'
     mf = manifests << Manifest.new(self, Manifest.manifests(self).sort.last)
     mf.upload!
@@ -261,13 +265,12 @@ class Project
             if copied && Digest::SHA1.file(file_path).to_s == file.sha1
               Log.info("checksum verification passed for file `#{file_path}`")
             else
-              Log.fatal("checksum verification failed for file `#{file_path}`")
+              msg = "checksum verification failed for file `#{file_path}`"
+              $DEBUG ? Log.error(msg) : Log.fatal(msg)
             end
           rescue
-            unless $DEBUG
-              Log.error("removing corrupted file `#{file_path}`")
-              FileUtils.rm_rf(file_path)
-            end
+            Log.warn("removing corrupted file `#{file_path}`")
+            FileUtils.rm_rf(file_path)
             raise
           end
         else
@@ -838,12 +841,13 @@ class Cat < Volume
         @io = io
         @io.seek(offset)
         @size = size
+        @total = 0 # Number of bytes already written
       end
       def readpartial(*args)
+        raise EOFError if @total >= @size
+        size = args[0] = @size - @total if @total + (size = args.first) > @size
+        @total += size
         @io.readpartial(*args)
-      end
-      def read
-        @io.read(@size)
       end
       def close
         @io.close
