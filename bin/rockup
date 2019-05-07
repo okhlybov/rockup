@@ -1,86 +1,62 @@
 #!/usr/bin/env ruby
+# frozen_string_literal: true
 
+
+require 'yaml'
 require 'rockup'
 require 'optparse'
 
-opts = {
-  mode: :backup,
-  full: false,
-  volume_type: :auto,
-  compression: :auto
-}
 
-Rockup::Log.level = Logger::DEBUG if $DEBUG
+raise 'missing repository URL' if (repository =  ARGV.shift).nil?
 
-OptionParser.new do |parser|
 
-  parser.banner = 'Usage: rockup [opts] backup-dir {source-dir-1 source-dir-2 ...}'
+project = Rockup::Project.new(repository)
 
-  parser.on('-h', '--help', 'Print help') do
-    puts parser
-    exit
+
+raise 'missing command' if (command = ARGV.shift).nil?
+
+
+case command
+when 'info'
+  $stdout << YAML.dump({
+      'repository' => project.repository.url,
+      'metadata' => project.repository.metadata.sort
+  })
+when 'metadata'
+  raise 'missing subcommand for metadata' if (command = ARGV.shift).nil?
+  case command
+  when 'info'
+    if (tag = ARGV.shift).nil?
+      tag = project.repository.metadata.sort.last
+      $stderr << "no metadata tag specified; using head tag `#{tag}`"
+    end
+    $stdout << YAML.dump(project.metadata[tag].to_yaml)
+  else
+    raise 'unknown metadata command; expected one of: ' + %w(info).join(' ')
   end
-
-  parser.on('-b', 'Perform full or incremental backup (the default mode if no other option is specified)') do end
-
-  parser.on('-B', 'Force full backup') do
-    opts[:full] = true
+when 'backup'
+  tag = nil
+  mode = :incremental
+  OptionParser.new do |parser|
+    parser.on('--full', 'perform full backup') {mode = :full}
+    parser.on('--incremental', 'perform incremental backup (default)') {mode = :incremental}
+    parser.on('--head METADATA', 'metadata head tag') {|t| tag = t}
+  end.parse!
+  case mode
+  when :full
+    $stderr << 'ignoring specified metadata head tag' unless tag.nil?
+    metadata = project.metadata[]
+    raise 'no sources specified' if ARGV.empty?
+    ARGV.each {|root| Rockup::Source.new(metadata, root)}
+  when :incremental
+    if tag.nil?
+      $stderr << 'no metadata head tag specified; using latest'
+      tag = project.repository.metadata.sort.last
+    end
+    metadata = project.metadata[tag]
   end
-
-  parser.on('-r DESTDIR', 'Restore files from backup to DESTDIR') do |dir|
-    opts[:mode] = :restore
-    opts[:restore] = dir
-  end
-
-  parser.on('--dry-run', 'Do not modify the filesystem in any way (no files/directories are created or modified)') do
-    opts[:dry] = true
-  end
-
-  parser.on('--compress', 'Enforce compression of backed data') do
-    opts[:compression] = :enforce
-  end
-
-  parser.on('--no-compress', 'Disable compression of backed data') do
-    opts[:compression] = :disable
-  end
-
-  parser.on('--separate', 'Store each backup file into separate stream file; do not coalesce') do
-    opts[:volume_type] = :copy
-  end
-
-  parser.on('--coalesce', 'Coalesce all backup files into single stream file') do
-    opts[:volume_type] = :cat
-  end
-
-  parser.on('-q', 'Suppress all logging') do
-    Rockup::Log.level = Logger::UNKNOWN
-  end
-
-  parser.on('-v', '--verbose', 'Enable logging') do
-    Rockup::Log.level = Logger::INFO
-  end
-
-  parser.on('--debug', 'Enable extensive logging') do
-    Rockup::Log.level = Logger::DEBUG
-  end
-
-end.parse!
-
-backupdir =  ARGV.shift
-srcdirs = ARGV
-
-raise 'Backup directory must be specified' if backupdir.nil?
-
-project = Rockup::Project.new(backupdir)
-
-#project.dry = opts[:dry]
-
-case opts[:mode]
-when :backup
-  raise 'At least one source directory must be specified' if srcdirs.empty?
-  project.compression = opts[:compression]
-  project.volume_type = opts[:volume_type]
-  project.backup!(srcdirs, opts[:full])
-when :restore
-  project.restore!(opts[:restore])
+  metadata.sources.each_value {|source| source.update}
+  metadata.write
+else
+  raise 'unknown command; expected one of: ' + %w(info metadata backup).join(' ')
 end
